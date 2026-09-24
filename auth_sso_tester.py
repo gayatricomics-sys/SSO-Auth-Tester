@@ -528,7 +528,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
 
     def _build_login_panel(self):
         top = JPanel(GridLayout(0, 2, 5, 5))
-        self.f_login_url = self._labeled_field(top, "Login POST URL:", "https://host/sso/login")
+        self.f_login_url = self._labeled_field(top, "Login POST URL:", "")
         self.f_email = self._labeled_field(top, "Email:", "")
         self.f_pass_field = JPasswordField("")
         top.add(JLabel("Password:")); top.add(self.f_pass_field)
@@ -542,7 +542,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
         self.f_lockout_attempts = self._labeled_field(top, "Lockout probe: max wrong-password attempts:", "4")
         self.cb_enum = JCheckBox("Enable user-enumeration probe (valid vs invalid email diffing)", True)
         self.cb_forgot = JCheckBox("Enable forgot-password probe", True)
-        self.f_forgot_url = self._labeled_field(top, "Forgot-password POST URL:", "https://host/sso/forgot-password")
+        self.f_forgot_url = self._labeled_field(top, "Forgot-password POST URL:", "")
         self.f_forgot_param = self._labeled_field(top, "Forgot-password email param:", "username")
 
         opts = JPanel(GridLayout(0, 1))
@@ -565,14 +565,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
         top = JPanel(GridLayout(0, 2, 5, 5))
         self.f_ms_tenant = self._labeled_field(top, "Tenant (GUID / verified domain):", "")
         self.f_ms_client_id = self._labeled_field(top, "client_id (App registration):", "")
-        self.f_ms_redirect = self._labeled_field(top, "redirect_uri:", "https://host/signin-oidc")
-        self.f_ms_scope = self._labeled_field(top, "scope:", "openid profile email")
+        self.f_ms_redirect = self._labeled_field(top, "redirect_uri:", "")
+        self.f_ms_scope = self._labeled_field(top, "scope:", "")
         ms_btn = JButton("Generate Entra ID (Azure AD) variants -> Repeater", actionPerformed=self.run_ms_oauth_variants)
 
         adfs_label = JLabel("--- Internal SSO: ADFS / WS-Federation ---")
-        self.f_adfs_base = self._labeled_field(top, "ADFS base URL:", "https://adfs.internal.host")
-        self.f_adfs_wtrealm = self._labeled_field(top, "wtrealm (RP identifier):", "urn:tcbc:app")
-        self.f_adfs_wreply = self._labeled_field(top, "wreply:", "https://host/adfs-callback")
+        self.f_adfs_base = self._labeled_field(top, "ADFS base URL:", "")
+        self.f_adfs_wtrealm = self._labeled_field(top, "wtrealm (RP identifier):", "")
+        self.f_adfs_wreply = self._labeled_field(top, "wreply:", "")
         adfs_btn = JButton("Generate ADFS/WS-Fed variants -> Repeater", actionPerformed=self.run_wsfed_variants)
 
         note = JTextArea("Covers external SSO through Entra ID and internal SSO through ADFS/WS-Federation.")
@@ -588,10 +588,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
 
     def _build_oauth_panel(self):
         top = JPanel(GridLayout(0, 2, 5, 5))
-        self.f_oauth_authorize = self._labeled_field(top, "Authorization endpoint URL:", "https://login.microsoftonline.com/<tenant>/oauth2/v2.0/authorize")
-        self.f_oauth_redirect = self._labeled_field(top, "Registered redirect_uri:", "https://host/signin-oidc")
+        self.f_oauth_authorize = self._labeled_field(top, "Authorization endpoint URL:", "")
+        self.f_oauth_redirect = self._labeled_field(top, "Registered redirect_uri:", "")
         self.f_oauth_client_id = self._labeled_field(top, "client_id:", "")
-        self.f_oauth_scope = self._labeled_field(top, "scope:", "openid profile email")
+        self.f_oauth_scope = self._labeled_field(top, "scope:", "")
 
         gen_btn = JButton("Generate OAuth/OIDC variants -> Repeater", actionPerformed=self.run_oauth_variants)
         note = JTextArea("Each variant is queued into a labeled Repeater tab for manual validation.")

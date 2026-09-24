@@ -6,13 +6,10 @@ A comprehensive Jython 2.7 extension for Burp Suite designed to automate data ex
 
 ## 🌟 Key Features
 
-### 1. ⚡ Real-Time Proxy Interception & Auto-Population
-- **Target / Login Tab**: Automatically populates `Login POST URL`, `Email`, `Password`, `OTP`, parameter names, and `Forgot Password URL` from intercepted POST login requests.
-- **OAuth 2.0 & OIDC**: Automatically detects `client_id`, `redirect_uri`, `scope`, and authorization endpoints from GET/POST traffic.
-- **Microsoft Entra ID (Azure AD)**: Extracts tenant GUIDs/domains, App Registration IDs, and redirect URIs directly from `login.microsoftonline.com` traffic.
-- **ADFS / WS-Federation**: Auto-captures `wtrealm`, `wreply`, and ADFS base URLs from WS-Fed endpoints.
-- **SAML 2.0**: Auto-extracts `SAMLResponse` and `SAMLRequest` parameters from intercepted requests, decodes XML assertions, and populates the editor tab.
-- **OWASP WSTG Module**: Automatically populates target endpoints for password changes, profile endpoints, and IDOR parameters (`user_id`, `account_id`).
+### 1. ⚡ Real-Time Proxy Interception & Zero-Error Auto-Population
+- **Clean Field Initialization**: Starts with clean, empty fields without hardcoded placeholder text, ensuring an uncluttered workspace across all projects.
+- **Dynamic Interception & Auto-Population**: Dynamically extracts and fills parameters across all tabs (`Login POST URL`, `Email`, `client_id`, `redirect_uri`, `scope`, `wtrealm`, `wreply`, `SAMLResponse`, etc.) in real time as traffic passes through Burp Proxy.
+- **Robust Silent Error Handling**: Optional or missing fields will never throw Java exceptions, Burp errors, or UI error popups, providing seamless execution across diverse applications.
 - **WAF Bypass**: Auto-captures blocked HTTP response status codes (`403 Forbidden`, `406`, `429 Rate-Limited`).
 
 ### 2. 🛡️ Comprehensive Security Test Generators
