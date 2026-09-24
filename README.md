@@ -35,6 +35,25 @@ A comprehensive Jython 2.7 extension for Burp Suite designed to automate data ex
 
 ---
 
+## 🧪 Advanced Passive SSO Checks
+
+The extension now performs the following passive checks automatically as traffic passes through Burp:
+
+- **Microsoft Entra ID / Identity Platform tokens**
+  - Issuer, tenant (`tid`), audience (`aud`), expiry (`exp`), `nbf`, `iat`, `kid`, and token-version sanity.
+  - App-only/service-principal confusion using `idtyp` and `appidacr`.
+  - `roles`, `scp`, `azp`/`appid`, MFA/authentication-context claims, and Graph/custom-API audience confusion.
+- **OAuth 2.0 / OIDC authorization requests**
+  - Missing `state`, missing or weak PKCE, implicit/hybrid flows, missing `nonce`, weak redirect URI patterns, HTTP downgrade, wildcard/userinfo/traversal tricks, and Microsoft multi-tenant endpoint exposure.
+- **SAML 2.0**
+  - Response/assertion signature coverage, missing audience/recipient constraints, HTTP recipients, lifetime issues, duplicate assertion IDs, missing issuer, comment/XXE markers, and missing `InResponseTo`.
+- **SSO session controls**
+  - `Cache-Control`, HSTS, `X-Content-Type-Options`, and cookie `Secure`/`HttpOnly`/`SameSite` flags.
+
+Findings appear in the **Results** tab with module labels such as `MS-Token-Passive`, `OAuth-Passive`, `SAML-Passive`, and `SSO-Session-Passive`.
+
+---
+
 ## 🚀 Installation & Setup
 
 1. **Prerequisite (Jython Standalone):**

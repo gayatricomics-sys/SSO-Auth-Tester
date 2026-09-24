@@ -185,6 +185,253 @@ def analyze_jwt(token):
 
 
 # ---------------------------------------------------------------------------
+# Advanced Microsoft Entra ID / OAuth / OIDC / SAML passive checks
+# ---------------------------------------------------------------------------
+
+MS_ISSUERS = ('login.microsoftonline.com', 'sts.windows.net')
+
+
+def analyze_ms_token(token):
+    """Deep decode/checks for Microsoft identity platform ID/access tokens."""
+    out = []
+    if not token:
+        return out
+    parts = token.split('.')
+    if len(parts) != 3:
+        return out
+    try:
+        header = json.loads(b64url_decode(parts[0]))
+        payload = json.loads(b64url_decode(parts[1]))
+    except Exception:
+        return out
+    if 'login.microsoftonline.com' not in str(payload.get('iss', '')) and \
+       'sts.windows.net' not in str(payload.get('iss', '')):
+        return out
+
+    alg = str(header.get('alg', ''))
+    typ = str(header.get('typ', ''))
+    kid = header.get('kid', '')
+    out.append(('info', 'MS token: alg=%s typ=%s kid=%s ver=%s' % (alg, typ, kid, payload.get('ver', ''))))
+
+    if not kid:
+        out.append(('high', 'MS token has no kid; server must pin expected key and reject unsigned/unknown-key tokens.'))
+    if alg.lower() == 'none':
+        out.append(('critical', 'MS token uses alg=none. Test whether validation middleware accepts unsigned tokens.'))
+    if alg.upper().startswith('HS'):
+        out.append(('high', 'MS token uses HS%s; check whether a public key is incorrectly accepted as HMAC secret.' % alg))
+    if alg not in ('RS256', 'ES256'):
+        out.append(('high', 'Unexpected Microsoft token algorithm: %s.' % alg))
+
+    if 'aud' not in payload:
+        out.append(('critical', 'MS token has no aud claim; audience must be enforced server-side.'))
+    if 'iss' not in payload:
+        out.append(('critical', 'MS token has no iss claim; issuer pinning must be enforced server-side.'))
+    if 'exp' not in payload:
+        out.append(('critical', 'MS token has no exp claim; expiry must be enforced server-side.'))
+    if 'nbf' not in payload:
+        out.append(('medium', 'MS token has no nbf claim; not-before validation is absent or nonstandard.'))
+    if 'iat' not in payload:
+        out.append(('low', 'MS token has no iat claim; issuance time is unavailable for freshness checks.'))
+
+    iss = str(payload.get('iss', ''))
+    tid = payload.get('tid')
+    if tid:
+        out.append(('info', 'MS token tid=%s. If app is single tenant, ensure server rejects any other tid.' % tid))
+        if '/common/' in iss or '/organizations/' in iss or '/consumers/' in iss:
+            out.append(('high', 'MS token issued from multi-tenant endpoint (%s). Server must allowlist tid/iss.' % iss))
+    else:
+        out.append(('high', 'MS token has no tid claim. For multi-tenant apps, enforce tenant allowlisting using oid/upn/appid context.'))
+
+    aud = str(payload.get('aud', ''))
+    if typ.lower().startswith('jwt') or typ == '':
+        if '00000003-0000-0000-c000-000000000000' in aud:
+            out.append(('info', 'Access token audience is Microsoft Graph. It should not be accepted by a custom app API.'))
+    if 'scp' in payload:
+        out.append(('info', 'Delegated permissions scp=%s. Check server maps every requested scope to real authorization.' % payload.get('scp')))
+    if 'roles' in payload:
+        out.append(('info', 'App roles present: %s. Verify server treats roles as authorization claims, not client-controlled input.' % payload.get('roles')))
+
+    idtyp = payload.get('idtyp')
+    appidacr = payload.get('appidacr')
+    if idtyp == 'app' or appidacr == '1':
+        out.append(('high', 'App-only/service principal token detected (idtyp=%s appidacr=%s). Confirm user-facing API rejects it.' % (idtyp, appidacr)))
+    if 'idtyp' in payload and payload.get('idtyp') not in ('user', 'app', 'group', 'device'):
+        out.append(('medium', 'Unexpected idtyp=%s; token-type validation may be weak.' % idtyp))
+
+    if 'azp' in payload and 'appid' in payload and payload.get('azp') != payload.get('appid'):
+        out.append(('medium', 'azp (%s) differs from appid (%s); verify the authorized party is explicitly trusted.' % (payload.get('azp'), payload.get('appid'))))
+    if 'nonce' not in payload:
+        out.append(('medium', 'No nonce claim. If this is an ID token, nonce must be bound to the client session and verified.'))
+    if 'amr' in payload:
+        out.append(('info', 'Authentication methods amr=%s. Check MFA requirement and mfa_auth_time handling.' % payload.get('amr')))
+    if 'xms_tcdt' in payload:
+        out.append(('info', 'Tenant creation timestamp xms_tcdt=%s present.' % payload.get('xms_tcdt')))
+    if 'acrs' in payload and payload.get('acrs'):
+        out.append(('info', 'Authentication context acrs=%s. Confirm API enforces required step-up claim.' % payload.get('acrs')))
+
+    try:
+        now = int(time.time())
+        exp = int(payload.get('exp'))
+        if exp <= now:
+            out.append(('info', 'Observed token is expired; verify backend rejects it rather than relying on browser session.'))
+        else:
+            out.append(('info', 'Token expires in %d seconds.' % (exp - now)))
+    except Exception:
+        pass
+    return out
+
+
+def check_oauth_request(url, params):
+    """Passive OAuth/OIDC authorization-request checks."""
+    findings = []
+    if not params:
+        return findings
+    has_client_id = 'client_id' in params
+    has_response_type = 'response_type' in params
+    if not (has_client_id and has_response_type):
+        return findings
+
+    rtype = str(params.get('response_type', '')).lower()
+    if 'token' in rtype:
+        findings.append(('high', 'OAuth implicit flow requested (response_type=%s). Tokens in URL fragments are exposed to browser history/Referer.' % rtype))
+    if 'none' in rtype:
+        findings.append(('medium', 'response_type=none requested; confirm this flow is intentionally disabled.'))
+    if 'code' in rtype:
+        if 'state' not in params:
+            findings.append(('high', 'OAuth authorization request has no state parameter; login CSRF protection missing.'))
+        if 'code_challenge' not in params:
+            findings.append(('high', 'OAuth code flow lacks PKCE code_challenge; authorization-code interception risk.'))
+        elif str(params.get('code_challenge_method', '')).lower() not in ('s256', ''):
+            findings.append(('high', 'PKCE method is not S256 (%s); accept only S256.' % params.get('code_challenge_method')))
+        elif 'code_challenge_method' not in params:
+            findings.append(('medium', 'code_challenge present but code_challenge_method missing; server may default to weak/plain.'))
+    if 'id_token' in rtype and 'nonce' not in params:
+        findings.append(('critical', 'OIDC ID-token flow requested without nonce; replay/binding protection missing.'))
+
+    redirect_uri = str(params.get('redirect_uri', ''))
+    if redirect_uri:
+        if redirect_uri.lower().startswith('http://'):
+            findings.append(('high', 'OAuth redirect_uri uses HTTP: %s' % redirect_uri))
+        if '*' in redirect_uri:
+            findings.append(('high', 'OAuth redirect_uri contains wildcard: %s' % redirect_uri))
+        if '@' in redirect_uri.split('//', 1)[-1].split('/', 1)[0]:
+            findings.append(('high', 'OAuth redirect_uri includes userinfo (@) segment; possible parser confusion.'))
+        if any(x in redirect_uri.lower() for x in ('/../', '/../../', '%2f..%2f', '%252f')):
+            findings.append(('high', 'OAuth redirect_uri includes traversal/overlong encoding: %s' % redirect_uri))
+    else:
+        findings.append(('medium', 'OAuth request has no redirect_uri; verify server requires an exact registered URI.'))
+
+    scope = str(params.get('scope', '')).lower()
+    if 'offline_access' in scope:
+        findings.append(('medium', 'offline_access requested; ensure refresh-token issuance is intentional and scoped.'))
+    if 'admin' in scope or '.default' in scope:
+        findings.append(('medium', 'High-privilege/default scope requested (%s); verify least privilege.' % scope))
+
+    u = url.lower()
+    if '/common/' in u or '/organizations/' in u or '/consumers/' in u:
+        findings.append(('high', 'Microsoft multi-tenant endpoint used; enforce tid/iss allowlisting after token validation.'))
+    if 'prompt=none' in (url + '&' + '&'.join('%s=%s' % (k, v) for k, v in params.items())).lower():
+        findings.append(('info', 'prompt=none request seen; useful for silent-login/SSO behavior review.'))
+    return findings
+
+
+def analyze_saml_xml(xml):
+    """Passive SAML configuration/structure checks."""
+    out = []
+    if not xml or '<' not in xml:
+        return out
+    low = xml.lower()
+    if 'doctype' in low or 'entity' in low:
+        out.append(('high', 'SAML XML contains DOCTYPE/entity markup; parser must disable DTD/external entities (XXE).'))
+    if '<!--' in xml:
+        out.append(('medium', 'SAML XML contains comments; verify parser does not allow comment-aware NameID truncation.'))
+
+    response_sigs = len(re.findall(r'<(?:\w+:)?Response\b[^>]*>(?:(?!<Assertion).*?)<(?:\w+:)?Signature\b', xml, re.S | re.I))
+    assertions = re.findall(r'<(?:\w+:)?Assertion\b.*?</(?:\w+:)?Assertion>', xml, re.S | re.I)
+    if not assertions:
+        out.append(('medium', 'No SAML Assertion found in decoded message.'))
+    else:
+        signed_assertions = 0
+        for a in assertions:
+            if re.search(r'<(?:\w+:)?Signature\b', a, re.I):
+                signed_assertions += 1
+        if signed_assertions == 0 and response_sigs == 0:
+            out.append(('critical', 'Neither SAML Response nor Assertion is signed.'))
+        elif signed_assertions == 0:
+            out.append(('high', 'Assertion is unsigned; only Response signature observed. Require assertion signature or validate exact signature/reference coverage.'))
+        else:
+            out.append(('info', 'Assertion signature present (%d/%d assertions).' % (signed_assertions, len(assertions))))
+
+    if not re.search(r'<(?:\w+:)?AudienceRestriction\b.*?</(?:\w+:)?AudienceRestriction>', xml, re.S | re.I):
+        out.append(('high', 'No AudienceRestriction found; token/SP audience binding may be missing.'))
+    audience = re.search(r'<(?:\w+:)?Audience\b[^>]*>(.*?)</(?:\w+:)?Audience>', xml, re.S | re.I)
+    if audience:
+        out.append(('info', 'Audience claim: %s. Verify exact match with SP Entity ID.' % audience.group(1).strip()))
+    else:
+        out.append(('high', 'No Audience element found.'))
+
+    recipient = re.search(r'(?:Recipient|Destination)="([^"]+)"', xml, re.I)
+    if recipient:
+        out.append(('info', 'Recipient/Destination: %s. Verify exact match with ACS endpoint and HTTPS scheme.' % recipient.group(1)))
+        if recipient.group(1).lower().startswith('http://'):
+            out.append(('high', 'Recipient/Destination uses HTTP: %s.' % recipient.group(1)))
+    else:
+        out.append(('medium', 'No Recipient/Destination attribute found; ACS binding should be explicit.'))
+
+    not_before = re.search(r'NotBefore="([^"]+)"', xml)
+    not_on_or_after = re.search(r'NotOnOrAfter="([^"]+)"', xml)
+    if not_on_or_after:
+        out.append(('info', 'Assertion NotOnOrAfter=%s; verify short lifetime and server clock skew.' % not_on_or_after.group(1)))
+    else:
+        out.append(('critical', 'No NotOnOrAfter condition; assertion lifetime may be unlimited.'))
+    if not not_before:
+        out.append(('medium', 'No NotBefore condition; freshness validation may be incomplete.'))
+
+    ids = re.findall(r'(?:\w+:)?Assertion\b[^>]*\bID="([^"]+)"', xml, re.I)
+    if len(ids) != len(set(ids)):
+        out.append(('high', 'Duplicate Assertion IDs found; replay protection and XML parser behavior must be reviewed.'))
+    if not re.search(r'<(?:\w+:)?Issuer\b[^>]*>([^<]+)</(?:\w+:)?Issuer>', xml, re.I):
+        out.append(('high', 'No Issuer element; SP must validate IdP entity ID.'))
+
+    nameid = re.search(r'<(?:\w+:)?NameID\b([^>]*)>(.*?)</(?:\w+:)?NameID>', xml, re.S | re.I)
+    if nameid:
+        out.append(('info', 'NameID=%s format=%s. Verify immutable identifier handling.' % (nameid.group(2).strip(), (nameid.group(1).strip() or 'unspecified'))))
+    else:
+        out.append(('medium', 'No NameID element found; identity mapping should be explicit.'))
+
+    if re.search(r'InResponseTo', xml, re.I):
+        out.append(('info', 'InResponseTo present; SP must bind response to outstanding AuthnRequest.'))
+    else:
+        out.append(('medium', 'No InResponseTo attribute; if IdP-initiated SSO is allowed, review CSRF/login-CSRF controls.'))
+    return out
+
+
+def check_sso_session_headers(headers_text, cookies_text):
+    out = []
+    low = (headers_text or '').lower()
+    if 'cache-control' not in low:
+        out.append(('medium', 'Authenticated/SSO response has no Cache-Control header; add no-store, no-cache, must-revalidate.'))
+    elif 'no-store' not in low:
+        out.append(('medium', 'Cache-Control lacks no-store on authenticated/SSO response.'))
+    if 'strict-transport-security' not in low:
+        out.append(('low', 'No Strict-Transport-Security header on SSO/auth response.'))
+    if 'x-content-type-options' not in low:
+        out.append(('low', 'No X-Content-Type-Options: nosniff header on SSO/auth response.'))
+    for line in re.findall(r'(?im)^Set-Cookie:\s*(.+)$', cookies_text or ''):
+        name = line.split('=', 1)[0].strip()
+        flags = line.lower()
+        missing = []
+        if 'secure' not in flags:
+            missing.append('Secure')
+        if 'httponly' not in flags:
+            missing.append('HttpOnly')
+        if 'samesite' not in flags:
+            missing.append('SameSite')
+        if missing:
+            out.append(('medium', 'Cookie %s missing flags: %s.' % (name, ', '.join(missing))))
+    return out
+
+# ---------------------------------------------------------------------------
 # SAML helpers
 # ---------------------------------------------------------------------------
 
@@ -843,7 +1090,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                 if m_adfs:
                     self._update_field(self.f_adfs_base, m_adfs.group(1))
 
-            # --- AUTO-POPULATE 4: SAML 2.0 ---
+            # --- AUTO-POPULATE 4: SAML 2.0 + PASSIVE CHECKS ---
             saml_val = all_params.get('SAMLResponse') or all_params.get('SAMLRequest')
             if saml_val:
                 raw = self._helpers.urlDecode(saml_val)
@@ -857,6 +1104,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                 if xml_decoded:
                     self.captured_saml_xml = xml_decoded
                     self._update_field(self.saml_preview, xml_decoded)
+                    for sev, note in analyze_saml_xml(xml_decoded):
+                        self.log("SAML-Passive", sev, "%s (@ %s)" % (note, url))
 
             # --- AUTO-POPULATE 5: WSTG AuthZ & Password Change ---
             if method == 'POST' and any(k in url.lower() for k in ['change-password', 'update-password', 'reset-password']):
@@ -874,6 +1123,25 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                         self.waf_capture_msg = messageInfo
                         self._update_field(self.waf_output, "Auto-captured HTTP %d blocked request to %s\nClick 'Send WAF-bypass variants' to run." % (status, url))
 
+            # --- ADVANCED PASSIVE SSO CHECKS (requests) ---
+            try:
+                for sev, note in check_oauth_request(url, all_params):
+                    self.log("OAuth-Passive", sev, "%s (@ %s)" % (note, url))
+            except Exception as e:
+                print("OAuth passive check error: %s" % e)
+
+            try:
+                tokens = []
+                for hdr in req_info.getHeaders()[1:]:
+                    if hdr.lower().startswith('authorization:'):
+                        tokens.extend(find_jwts(hdr.split(':', 1)[1]))
+                for tok in list(set(tokens))[:8]:
+                    for sev, note in analyze_ms_token(tok):
+                        self.log("MS-Token-Passive", sev, "%s (@ %s)" % (note, url))
+            except Exception as e:
+                print("Token passive check error: %s" % e)
+
+
             # --- PASSIVE RECON & WSTG HEADERS ---
             if not messageIsRequest:
                 resp = messageInfo.getResponse()
@@ -883,6 +1151,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                     wstg_findings = check_wstg_auth_headers(url, resp_info.getStatusCode(), headers_text)
                     for sev, note in wstg_findings:
                         self.log("WSTG-Passive", sev, "%s (@ %s)" % (note, url))
+
+                    if any(k in url.lower() for k in ('login', 'auth', 'oauth', 'saml', 'token', 'session', 'account', 'profile', 'admin')):
+                        for sev, note in check_sso_session_headers(headers_text, headers_text):
+                            self.log("SSO-Session-Passive", sev, "%s (@ %s)" % (note, url))
+
+                    for tok in find_jwts(self._helpers.bytesToString(resp)[resp_info.getBodyOffset():]):
+                        for sev, note in analyze_ms_token(tok):
+                            self.log("MS-Token-Passive", sev, "%s (@ %s)" % (note, url))
 
                     mime = resp_info.getStatedMimeType().lower()
                     if 'script' in mime or url.endswith('.js'):
