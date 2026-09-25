@@ -6,13 +6,18 @@ A comprehensive Jython 2.7 extension for Burp Suite designed to automate data ex
 
 ## 🌟 Key Features
 
-### 1. ⚡ Real-Time Proxy Interception & Zero-Error Auto-Population
-- **Clean Field Initialization**: Starts with clean, empty fields without hardcoded placeholder text, ensuring an uncluttered workspace across all projects.
-- **Dynamic Interception & Auto-Population**: Dynamically extracts and fills parameters across all tabs (`Login POST URL`, `Email`, `client_id`, `redirect_uri`, `scope`, `wtrealm`, `wreply`, `SAMLResponse`, etc.) in real time as traffic passes through Burp Proxy.
-- **Robust Silent Error Handling**: Optional or missing fields will never throw Java exceptions, Burp errors, or UI error popups, providing seamless execution across diverse applications.
-- **WAF Bypass**: Auto-captures blocked HTTP response status codes (`403 Forbidden`, `406`, `429 Rate-Limited`).
+### 1. ⚡ Native Burp Scanner Integration (`IScannerCheck`)
+- **Passive Scanner Integration**: Automatically runs passive checks on all traffic going through Burp Suite (Proxy, Repeater, Scanner, Spider).
+- **Active Scanner Integration**: Automatically performs active vulnerability probes when running Active Scans in Burp Suite.
+- **Official Burp Dashboard & Target Issue Activity**: Reports findings directly into Burp Suite's native **Dashboard**, **Target -> Issue Activity**, and **Scanner** tab views as native `IScanIssue` items.
 
-### 2. 🛡️ Comprehensive Security Test Generators
+### 2. ⚡ Real-Time Proxy Interception & Universal Auto-Population
+- **Case-Insensitive Traffic Parsing**: Dynamically extracts parameters across URL query strings, URL-encoded POST bodies, JSON payloads, and HTTP headers (`Authorization: Bearer`, `Cookie`, etc.).
+- **Clean Field Initialization**: Starts with clean, empty fields without hardcoded placeholder text, ensuring an uncluttered workspace across all projects.
+- **Robust Silent Error Handling & Diagnostic Output**: Prevents Java exceptions and Burp error popups. Live traffic logs print directly to Burp's Extender Output window (`[AuthSSO Traffic] ...`).
+- **WAF Bypass Queue**: Auto-captures blocked HTTP response status codes (`403 Forbidden`, `406`, `429 Rate-Limited`).
+
+### 3. 🛡️ Comprehensive Security Test Generators
 - **OAuth 2.0 / OIDC**:
   - `redirect_uri` validation checks (Subdomains, `@` userinfo trick, path traversal, double encoding `%252f`, HTTP downgrade).
   - `response_type` tampering (Implicit flow `token`, Hybrid flow `code id_token token`, `response_type=none`).
@@ -35,9 +40,9 @@ A comprehensive Jython 2.7 extension for Burp Suite designed to automate data ex
 
 ---
 
-## 🧪 Advanced Passive SSO Checks
+## 🧪 Advanced Passive & Active SSO Checks
 
-The extension now performs the following passive checks automatically as traffic passes through Burp:
+The extension performs the following security checks automatically as traffic passes through Burp or during Active/Passive scans:
 
 - **Microsoft Entra ID / Identity Platform tokens**
   - Issuer, tenant (`tid`), audience (`aud`), expiry (`exp`), `nbf`, `iat`, `kid`, and token-version sanity.
@@ -50,7 +55,7 @@ The extension now performs the following passive checks automatically as traffic
 - **SSO session controls**
   - `Cache-Control`, HSTS, `X-Content-Type-Options`, and cookie `Secure`/`HttpOnly`/`SameSite` flags.
 
-Findings appear in the **Results** tab with module labels such as `MS-Token-Passive`, `OAuth-Passive`, `SAML-Passive`, and `SSO-Session-Passive`.
+Findings appear in both the extension's **Results** tab and Burp Suite's official **Target / Dashboard Issue Activity** list.
 
 ---
 
@@ -74,7 +79,7 @@ Findings appear in the **Results** tab with module labels such as `MS-Token-Pass
 
 ## 📊 Workflow & Usage
 
-1. **Proxy Interception**: Turn on Burp Proxy or browse your target web application. All fields across the extension GUI will automatically populate as traffic passes through.
+1. **Proxy & Scanner Integration**: Turn on Burp Proxy, browse your target web application, or launch a scan. All fields across the extension GUI will automatically populate, and scanner issues will populate in Burp's Dashboard & Target tab.
 2. **Generate Test Variants**: Click the module buttons on any tab (OAuth, SAML, WSTG, WAF Bypass) to generate test variants directly into Burp Repeater.
 3. **Review & Report**: View captured findings in the **Results** tab and export a structured Markdown report (`auth_sso_wstg_test_report.md`).
 

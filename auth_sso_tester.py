@@ -4,10 +4,13 @@ Auth / SSO / OAuth / SAML / WSTG Tester — Burp Suite extension (Jython 2.7)
 =============================================================================
 
 Features:
-- Automatic Population: Dynamically extracts and auto-populates all GUI fields across
+- Automatic Population: Dynamically extracts and auto-populates GUI fields across
   all tabs (Target/Login, Microsoft SSO/ADFS, OAuth/OIDC, SAML, WSTG, WAF) as traffic
-  passes through Burp Proxy or Repeater.
+  passes through Burp Proxy, Repeater, or Scanner.
 - Full OAuth 2.0 / OIDC, SAML 2.0, OWASP WSTG, and WAF Bypass testing modules.
+- Native Burp Scanner Integration (IScannerCheck): Automatically populates findings
+  into both the extension's Results tab and Burp Suite's official Dashboard & Target Issue Activity tree.
+- Case-Insensitive Traffic Parsing: Extracts SAML, OAuth, OIDC, JWT, ADFS from URL, Body (URL-encoded or JSON), and Headers.
 - Zero error display in Burp Suite with robust exception handling.
 """
 
@@ -20,7 +23,8 @@ import string
 import zlib
 import binascii
 
-from burp import IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IHttpService
+from burp import (IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IHttpService,
+                  IScannerCheck, IScanIssue)
 
 from javax.swing import (JPanel, JButton, JLabel, JTextField, JPasswordField, JTabbedPane,
                           JScrollPane, JTable, JTextArea, JCheckBox, BoxLayout, JOptionPane,
@@ -103,13 +107,44 @@ def parse_query_or_body(text):
     params = {}
     if not text:
         return params
-    if text.startswith('?'):
-        text = text[1:]
-    for pair in text.split('&'):
+    text_str = str(text).strip()
+    if not text_str:
+        return params
+    if (text_str.startswith('{') and text_str.endswith('}')) or (text_str.startswith('[') and text_str.endswith(']')):
+        try:
+            data = json.loads(text_str)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    params[str(k)] = str(v) if v is not None else ""
+                return params
+        except Exception:
+            pass
+    if text_str.startswith('?'):
+        text_str = text_str[1:]
+    for pair in text_str.split('&'):
         if '=' in pair:
             k, v = pair.split('=', 1)
             params[k.strip()] = v.strip()
     return params
+
+
+def get_param_nocase(params, *keys):
+    if not params:
+        return None
+    params_lower = {str(k).lower(): v for k, v in params.items()}
+    for key in keys:
+        if str(key).lower() in params_lower:
+            return params_lower[str(key).lower()]
+    return None
+
+
+def extract_saml_from_text(text):
+    if not text:
+        return None
+    m = re.search(r'(?i)(SAMLResponse|SAMLRequest|saml_response|saml_request)=([^&\s"\']+)', text)
+    if m:
+        return m.group(2)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -286,42 +321,48 @@ def check_oauth_request(url, params):
     findings = []
     if not params:
         return findings
-    has_client_id = 'client_id' in params
-    has_response_type = 'response_type' in params
-    if not (has_client_id and has_response_type):
+
+    client_id = get_param_nocase(params, 'client_id', 'clientid', 'app_id', 'appid')
+    response_type = get_param_nocase(params, 'response_type', 'responsetype')
+    redirect_uri = get_param_nocase(params, 'redirect_uri', 'redirecturi', 'redirect_url', 'redirecturl')
+    state = get_param_nocase(params, 'state')
+    code_challenge = get_param_nocase(params, 'code_challenge', 'codechallenge')
+    code_challenge_method = get_param_nocase(params, 'code_challenge_method', 'codechallengemethod')
+
+    if not (client_id and response_type):
         return findings
 
-    rtype = str(params.get('response_type', '')).lower()
+    rtype = str(response_type).lower()
     if 'token' in rtype:
         findings.append(('high', 'OAuth implicit flow requested (response_type=%s). Tokens in URL fragments are exposed to browser history/Referer.' % rtype))
     if 'none' in rtype:
         findings.append(('medium', 'response_type=none requested; confirm this flow is intentionally disabled.'))
     if 'code' in rtype:
-        if 'state' not in params:
+        if not state:
             findings.append(('high', 'OAuth authorization request has no state parameter; login CSRF protection missing.'))
-        if 'code_challenge' not in params:
+        if not code_challenge:
             findings.append(('high', 'OAuth code flow lacks PKCE code_challenge; authorization-code interception risk.'))
-        elif str(params.get('code_challenge_method', '')).lower() not in ('s256', ''):
-            findings.append(('high', 'PKCE method is not S256 (%s); accept only S256.' % params.get('code_challenge_method')))
-        elif 'code_challenge_method' not in params:
+        elif str(code_challenge_method).lower() not in ('s256', ''):
+            findings.append(('high', 'PKCE method is not S256 (%s); accept only S256.' % code_challenge_method))
+        elif not code_challenge_method:
             findings.append(('medium', 'code_challenge present but code_challenge_method missing; server may default to weak/plain.'))
-    if 'id_token' in rtype and 'nonce' not in params:
+    if 'id_token' in rtype and not get_param_nocase(params, 'nonce'):
         findings.append(('critical', 'OIDC ID-token flow requested without nonce; replay/binding protection missing.'))
 
-    redirect_uri = str(params.get('redirect_uri', ''))
     if redirect_uri:
-        if redirect_uri.lower().startswith('http://'):
-            findings.append(('high', 'OAuth redirect_uri uses HTTP: %s' % redirect_uri))
-        if '*' in redirect_uri:
-            findings.append(('high', 'OAuth redirect_uri contains wildcard: %s' % redirect_uri))
-        if '@' in redirect_uri.split('//', 1)[-1].split('/', 1)[0]:
+        red_str = str(redirect_uri)
+        if red_str.lower().startswith('http://'):
+            findings.append(('high', 'OAuth redirect_uri uses HTTP: %s' % red_str))
+        if '*' in red_str:
+            findings.append(('high', 'OAuth redirect_uri contains wildcard: %s' % red_str))
+        if '@' in red_str.split('//', 1)[-1].split('/', 1)[0]:
             findings.append(('high', 'OAuth redirect_uri includes userinfo (@) segment; possible parser confusion.'))
-        if any(x in redirect_uri.lower() for x in ('/../', '/../../', '%2f..%2f', '%252f')):
-            findings.append(('high', 'OAuth redirect_uri includes traversal/overlong encoding: %s' % redirect_uri))
+        if any(x in red_str.lower() for x in ('/../', '/../../', '%2f..%2f', '%252f')):
+            findings.append(('high', 'OAuth redirect_uri includes traversal/overlong encoding: %s' % red_str))
     else:
         findings.append(('medium', 'OAuth request has no redirect_uri; verify server requires an exact registered URI.'))
 
-    scope = str(params.get('scope', '')).lower()
+    scope = str(get_param_nocase(params, 'scope') or '').lower()
     if 'offline_access' in scope:
         findings.append(('medium', 'offline_access requested; ensure refresh-token issuance is intentional and scoped.'))
     if 'admin' in scope or '.default' in scope:
@@ -708,6 +749,62 @@ def gen_waf_bypass_variants(method, path, host, headers, body):
 
 
 # ---------------------------------------------------------------------------
+# Custom Burp Scan Issue Implementation for Native Dashboard/Target Display
+# ---------------------------------------------------------------------------
+
+class CustomScanIssue(IScanIssue):
+    def __init__(self, httpService, url, httpMessages, name, detail, severity, confidence="Certain"):
+        self._httpService = httpService
+        self._url = url
+        self._httpMessages = httpMessages
+        self._name = name
+        self._detail = detail
+        sev_map = {
+            'critical': 'High',
+            'high': 'High',
+            'medium': 'Medium',
+            'low': 'Low',
+            'info': 'Information',
+            'information': 'Information'
+        }
+        self._severity = sev_map.get(str(severity).lower(), 'Medium')
+        self._confidence = confidence
+
+    def getUrl(self):
+        return self._url
+
+    def getIssueName(self):
+        return self._name
+
+    def getIssueType(self):
+        return 0x08000000
+
+    def getSeverity(self):
+        return self._severity
+
+    def getConfidence(self):
+        return self._confidence
+
+    def getIssueBackground(self):
+        return "Detected by Auth/SSO/OAuth/SAML/WSTG Tester Extension."
+
+    def getRemediationBackground(self):
+        return "Ensure authentication tokens, SAML assertions, and OAuth flows strictly follow security standards."
+
+    def getIssueDetail(self):
+        return self._detail
+
+    def getRemediationDetail(self):
+        return None
+
+    def getHttpMessages(self):
+        return self._httpMessages
+
+    def getHttpService(self):
+        return self._httpService
+
+
+# ---------------------------------------------------------------------------
 # Swing Thread-Safe Field Updater Runner
 # ---------------------------------------------------------------------------
 
@@ -728,12 +825,14 @@ class FieldUpdater(Runnable):
 # Main Burp Extension Class
 # ---------------------------------------------------------------------------
 
-class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
+class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IScannerCheck):
 
     def registerExtenderCallbacks(self, callbacks):
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
         callbacks.setExtensionName("Auth/SSO/OAuth/SAML/WSTG Tester")
+        self.stdout = PrintWriter(callbacks.getStdout(), True)
+        self.stderr = PrintWriter(callbacks.getStderr(), True)
 
         self.captured_saml_xml = None
         self.captured_saml_redirect_binding = False
@@ -744,7 +843,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
         callbacks.addSuiteTab(self)
         callbacks.registerHttpListener(self)
         callbacks.registerContextMenuFactory(self)
-        print("Auth/SSO/OAuth/SAML/WSTG Tester loaded with Auto-Population enabled.")
+        callbacks.registerScannerCheck(self)
+        self.stdout.println("[+] Auth/SSO/OAuth/SAML/WSTG Tester loaded & registered with Proxy + Active/Passive Scanner.")
 
     def _update_field(self, field, val):
         if field and val:
@@ -934,14 +1034,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
             self.results_model.addRow([module, severity, finding])
             self.results_rows.append({"module": module, "severity": severity, "finding": finding})
         except Exception as e:
-            print("Error logging finding: %s" % e)
+            self.stderr.println("Error logging finding: %s" % e)
 
     def queue_manual(self, module, item, reason):
         try:
             self.manual_model.addRow([module, item, reason])
             self.manual_rows.append({"module": module, "item": item, "reason": reason})
         except Exception as e:
-            print("Error logging manual item: %s" % e)
+            self.stderr.println("Error logging manual item: %s" % e)
 
     # ---------------- Context menu ----------------
 
@@ -959,33 +1059,31 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                 body = self._helpers.bytesToString(req)[info.getBodyOffset():]
                 url = str(info.getUrl())
                 xml = None
-                for pname in ('SAMLResponse', 'SAMLRequest'):
-                    m = re.search(pname + r'=([^&\s]+)', body) or re.search(pname + r'=([^&\s]+)', url)
-                    if m:
-                        raw = self._helpers.urlDecode(m.group(1))
+                saml_raw = extract_saml_from_text(body) or extract_saml_from_text(url)
+                if saml_raw:
+                    raw = self._helpers.urlDecode(saml_raw)
+                    try:
+                        xml = saml_decode(raw, self.cb_redirect_binding.isSelected())
+                    except Exception:
                         try:
-                            xml = saml_decode(raw, self.cb_redirect_binding.isSelected())
-                        except Exception:
-                            try:
-                                xml = saml_decode(raw, True)
-                            except Exception as e:
-                                JOptionPane.showMessageDialog(self.main_panel, "Could not decode SAML: %s" % e)
-                                return
-                        break
+                            xml = saml_decode(raw, True)
+                        except Exception as e:
+                            JOptionPane.showMessageDialog(self.main_panel, "Could not decode SAML: %s" % e)
+                            return
                 if xml is None:
                     JOptionPane.showMessageDialog(self.main_panel, "No SAMLResponse/SAMLRequest parameter found.")
                     return
                 self.captured_saml_xml = xml
                 self._update_field(self.saml_preview, xml)
             except Exception as e:
-                print("Error capturing SAML: %s" % e)
+                self.stderr.println("Error capturing SAML: %s" % e)
 
         def capture_waf(evt):
             try:
                 self.waf_capture_msg = selected[0]
                 self._update_field(self.waf_output, "Captured request to %s -- click 'Run' to send bypass variants.\n" % str(self._helpers.analyzeRequest(selected[0]).getUrl()))
             except Exception as e:
-                print("Error capturing WAF request: %s" % e)
+                self.stderr.println("Error capturing WAF request: %s" % e)
 
         def capture_wstg(evt):
             try:
@@ -995,7 +1093,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                 self._update_field(self.f_wstg_target_url, url)
                 JOptionPane.showMessageDialog(self.main_panel, "Captured request for WSTG AuthZ/IDOR: %s" % url)
             except Exception as e:
-                print("Error capturing WSTG request: %s" % e)
+                self.stderr.println("Error capturing WSTG request: %s" % e)
 
         menu.add(JMenuItem("Send to Auth/SSO Tester > Capture SAML", actionPerformed=capture_saml))
         menu.add(JMenuItem("Send to Auth/SSO Tester > Capture for WAF bypass", actionPerformed=capture_waf))
@@ -1030,6 +1128,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
             all_params = dict(params)
             all_params.update(body_params)
 
+            # Diagnostic stdout logging
+            self.stdout.println("[AuthSSO Traffic] %s %s" % (method, url))
+
             # --- AUTO-POPULATE 1: Target / Login Tab ---
             if method == 'POST' and any(k in url.lower() for k in ['login', 'signin', 'auth', 'authenticate', 'token']):
                 self._update_field(self.f_login_url, url)
@@ -1055,20 +1156,23 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                         self._update_field(self.f_forgot_param, pk)
 
             # --- AUTO-POPULATE 2: OAuth 2.0 / OIDC (Generic) & Microsoft Entra ID ---
-            if 'client_id' in all_params or 'redirect_uri' in all_params or 'response_type' in all_params:
-                client_id = all_params.get('client_id', '')
-                redirect_uri = self._helpers.urlDecode(all_params.get('redirect_uri', ''))
-                scope = self._helpers.urlDecode(all_params.get('scope', ''))
+            client_id = get_param_nocase(all_params, 'client_id', 'clientid', 'app_id', 'appid')
+            redirect_uri = get_param_nocase(all_params, 'redirect_uri', 'redirecturi', 'redirect_url', 'redirecturl')
+            scope = get_param_nocase(all_params, 'scope', 'scopes')
+            response_type = get_param_nocase(all_params, 'response_type', 'responsetype')
 
+            if client_id or redirect_uri or response_type or 'oauth' in url.lower() or 'openid' in url.lower():
                 if client_id:
                     self._update_field(self.f_oauth_client_id, client_id)
                     self._update_field(self.f_ms_client_id, client_id)
                 if redirect_uri:
-                    self._update_field(self.f_oauth_redirect, redirect_uri)
-                    self._update_field(self.f_ms_redirect, redirect_uri)
+                    red_dec = self._helpers.urlDecode(redirect_uri)
+                    self._update_field(self.f_oauth_redirect, red_dec)
+                    self._update_field(self.f_ms_redirect, red_dec)
                 if scope:
-                    self._update_field(self.f_oauth_scope, scope)
-                    self._update_field(self.f_ms_scope, scope)
+                    scope_dec = self._helpers.urlDecode(scope)
+                    self._update_field(self.f_oauth_scope, scope_dec)
+                    self._update_field(self.f_ms_scope, scope_dec)
                 if 'authorize' in url.lower() or 'auth' in url.lower():
                     self._update_field(self.f_oauth_authorize, url.split('?')[0])
 
@@ -1079,19 +1183,22 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                         self._update_field(self.f_ms_tenant, tenant_val)
 
             # --- AUTO-POPULATE 3: ADFS / WS-Federation ---
-            if 'wtrealm' in all_params or 'wreply' in all_params or '/adfs/ls/' in url.lower():
-                wtrealm = self._helpers.urlDecode(all_params.get('wtrealm', ''))
-                wreply = self._helpers.urlDecode(all_params.get('wreply', ''))
+            wtrealm = get_param_nocase(all_params, 'wtrealm', 'realm')
+            wreply = get_param_nocase(all_params, 'wreply', 'reply')
+            if wtrealm or wreply or '/adfs/ls/' in url.lower():
                 if wtrealm:
-                    self._update_field(self.f_adfs_wtrealm, wtrealm)
+                    self._update_field(self.f_adfs_wtrealm, self._helpers.urlDecode(wtrealm))
                 if wreply:
-                    self._update_field(self.f_adfs_wreply, wreply)
+                    self._update_field(self.f_adfs_wreply, self._helpers.urlDecode(wreply))
                 m_adfs = re.search(r'^(https?://[^/]+)', url)
                 if m_adfs:
                     self._update_field(self.f_adfs_base, m_adfs.group(1))
 
             # --- AUTO-POPULATE 4: SAML 2.0 + PASSIVE CHECKS ---
-            saml_val = all_params.get('SAMLResponse') or all_params.get('SAMLRequest')
+            saml_val = get_param_nocase(all_params, 'SAMLResponse', 'SAMLRequest', 'saml_response', 'saml_request')
+            if not saml_val:
+                saml_val = extract_saml_from_text(query_str) or extract_saml_from_text(req_body)
+
             if saml_val:
                 raw = self._helpers.urlDecode(saml_val)
                 try:
@@ -1128,19 +1235,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                 for sev, note in check_oauth_request(url, all_params):
                     self.log("OAuth-Passive", sev, "%s (@ %s)" % (note, url))
             except Exception as e:
-                print("OAuth passive check error: %s" % e)
+                self.stderr.println("OAuth passive check error: %s" % e)
 
             try:
                 tokens = []
                 for hdr in req_info.getHeaders()[1:]:
-                    if hdr.lower().startswith('authorization:'):
-                        tokens.extend(find_jwts(hdr.split(':', 1)[1]))
+                    if ':' in hdr:
+                        k, v = hdr.split(':', 1)
+                        if k.strip().lower() in ('authorization', 'cookie'):
+                            tokens.extend(find_jwts(v))
                 for tok in list(set(tokens))[:8]:
                     for sev, note in analyze_ms_token(tok):
                         self.log("MS-Token-Passive", sev, "%s (@ %s)" % (note, url))
             except Exception as e:
-                print("Token passive check error: %s" % e)
-
+                self.stderr.println("Token passive check error: %s" % e)
 
             # --- PASSIVE RECON & WSTG HEADERS ---
             if not messageIsRequest:
@@ -1170,7 +1278,138 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
                                 snippet = m.group(0)[:120]
                                 self.log("JS-recon", "info", "%s @ %s -> %s" % (label, url, snippet))
         except Exception as e:
-            print("Auto-population proxy error: %s" % e)
+            self.stderr.println("Auto-population proxy error: %s" % e)
+
+    # ---------------- IScannerCheck Interface Implementation ----------------
+
+    def doPassiveScan(self, baseRequestResponse):
+        issues = ArrayList()
+        try:
+            req_info = self._helpers.analyzeRequest(baseRequestResponse)
+            url = req_info.getUrl()
+            url_str = str(url)
+            method = req_info.getMethod()
+
+            req_bytes = baseRequestResponse.getRequest()
+            req_text = self._helpers.bytesToString(req_bytes) if req_bytes else ""
+            req_body = req_text[req_info.getBodyOffset():] if req_text else ""
+            query_str = url.getQuery() or ""
+
+            all_params = parse_query_or_body(query_str)
+            all_params.update(parse_query_or_body(req_body))
+
+            http_service = baseRequestResponse.getHttpService()
+
+            # 1. OAuth Request Audit
+            for sev, note in check_oauth_request(url_str, all_params):
+                self.log("OAuth-Passive", sev, "%s (@ %s)" % (note, url_str))
+                issues.add(CustomScanIssue(http_service, url, [baseRequestResponse], "OAuth Audit: " + note.split(';')[0], note, sev))
+
+            # 2. JWT / Entra ID Token Audit
+            tokens = []
+            for hdr in req_info.getHeaders()[1:]:
+                if ':' in hdr:
+                    k, v = hdr.split(':', 1)
+                    if k.strip().lower() in ('authorization', 'cookie'):
+                        tokens.extend(find_jwts(v))
+            tokens.extend(find_jwts(req_body))
+
+            resp_bytes = baseRequestResponse.getResponse()
+            if resp_bytes:
+                resp_info = self._helpers.analyzeResponse(resp_bytes)
+                resp_text = self._helpers.bytesToString(resp_bytes)
+                resp_body = resp_text[resp_info.getBodyOffset():]
+                tokens.extend(find_jwts(resp_body))
+
+                headers_text = "\n".join(list(resp_info.getHeaders()))
+                wstg_findings = check_wstg_auth_headers(url_str, resp_info.getStatusCode(), headers_text)
+                for sev, note in wstg_findings:
+                    self.log("WSTG-Passive", sev, "%s (@ %s)" % (note, url_str))
+                    issues.add(CustomScanIssue(http_service, url, [baseRequestResponse], "WSTG Auth Header Audit: " + note.split(';')[0], note, sev))
+
+                if any(k in url_str.lower() for k in ('login', 'auth', 'oauth', 'saml', 'token', 'session', 'account', 'profile', 'admin')):
+                    for sev, note in check_sso_session_headers(headers_text, headers_text):
+                        self.log("SSO-Session-Passive", sev, "%s (@ %s)" % (note, url_str))
+                        issues.add(CustomScanIssue(http_service, url, [baseRequestResponse], "SSO Session Security: " + note.split(';')[0], note, sev))
+
+            for tok in list(set(tokens))[:8]:
+                for sev, note in analyze_ms_token(tok):
+                    self.log("MS-Token-Passive", sev, "%s (@ %s)" % (note, url_str))
+                    issues.add(CustomScanIssue(http_service, url, [baseRequestResponse], "Microsoft Entra ID / JWT Audit: " + note.split(';')[0], note, sev))
+
+            # 3. SAML Audit
+            saml_raw = get_param_nocase(all_params, 'SAMLResponse', 'SAMLRequest', 'saml_response', 'saml_request')
+            if not saml_raw:
+                saml_raw = extract_saml_from_text(query_str) or extract_saml_from_text(req_body)
+            if saml_raw:
+                raw_decoded = self._helpers.urlDecode(saml_raw)
+                xml_decoded = None
+                try:
+                    xml_decoded = saml_decode(raw_decoded, self.cb_redirect_binding.isSelected())
+                except Exception:
+                    try:
+                        xml_decoded = saml_decode(raw_decoded, True)
+                    except Exception:
+                        pass
+                if xml_decoded:
+                    self.captured_saml_xml = xml_decoded
+                    self._update_field(self.saml_preview, xml_decoded)
+                    for sev, note in analyze_saml_xml(xml_decoded):
+                        self.log("SAML-Passive", sev, "%s (@ %s)" % (note, url_str))
+                        issues.add(CustomScanIssue(http_service, url, [baseRequestResponse], "SAML Security Audit: " + note.split(';')[0], note, sev))
+
+        except Exception as e:
+            self.stderr.println("Error in doPassiveScan: %s" % e)
+
+        return issues if issues.size() > 0 else None
+
+    def doActiveScan(self, baseRequestResponse, insertionPoint):
+        issues = ArrayList()
+        try:
+            req_info = self._helpers.analyzeRequest(baseRequestResponse)
+            url = req_info.getUrl()
+            url_str = str(url)
+            http_service = baseRequestResponse.getHttpService()
+            protocol = url.getProtocol()
+            host = url.getHost()
+            port = url.getPort() if url.getPort() != -1 else (443 if protocol == 'https' else 80)
+            path = url.getPath()
+            query_str = url.getQuery() or ""
+            all_params = parse_query_or_body(query_str)
+
+            # Active Probe 1: OAuth Redirect URI Bypasses & State Omission
+            if get_param_nocase(all_params, 'client_id', 'redirect_uri', 'response_type'):
+                redirect_uri = get_param_nocase(all_params, 'redirect_uri') or ""
+                client_id = get_param_nocase(all_params, 'client_id') or ""
+                scope = get_param_nocase(all_params, 'scope') or "openid"
+                variants = gen_oauth_variants(url_str, redirect_uri, client_id, scope, {})
+                for name, desc, p, h, pt, path_v, q_v, expectation in variants[:4]:
+                    raw_req = build_raw_request("GET", path_v, h, {}, None, extra_query=q_v)
+                    status, resp_text = self._send(p, h, pt, raw_req)
+                    if status and status in (200, 302, 301):
+                        msg = "OAuth Active Probe '%s': Received HTTP %s. %s" % (name, status, expectation)
+                        self.log("OAuth-ActiveScan", "medium", msg)
+                        issues.add(CustomScanIssue(http_service, url, [baseRequestResponse], "OAuth Active Scanner: " + name, msg, "Medium"))
+
+            # Active Probe 2: Auth Bypass Headers (X-Forwarded-User, etc.)
+            if any(k in url_str.lower() for k in ('login', 'admin', 'user', 'profile', 'api')):
+                for name, method, p_path, p_host, extra_hdrs, b_body, exp in gen_wstg_auth_bypass_headers(req_info.getMethod(), path, host, {}, None)[:3]:
+                    raw_req = build_raw_request(method, p_path, p_host, extra_hdrs, b_body)
+                    status, resp_text = self._send(protocol, host, port, raw_req)
+                    if status == 200:
+                        msg = "Auth Bypass Header Probe '%s' returned HTTP 200. Verification needed." % name
+                        self.log("WSTG-ActiveScan", "high", msg)
+                        issues.add(CustomScanIssue(http_service, url, [baseRequestResponse], "Authentication Bypass via Header: " + name, msg, "High"))
+
+        except Exception as e:
+            self.stderr.println("Error in doActiveScan: %s" % e)
+
+        return issues if issues.size() > 0 else None
+
+    def consolidateDuplicateIssues(self, existingIssue, newIssue):
+        if existingIssue.getIssueName() == newIssue.getIssueName() and str(existingIssue.getUrl()) == str(newIssue.getUrl()):
+            return -1
+        return 0
 
     # ---------------- Login / Session / Password Module ----------------
 
@@ -1187,7 +1426,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
             headers = list(info.getHeaders())
             return info.getStatusCode(), "\n".join(headers) + "\n\n" + body
         except Exception as e:
-            print("HTTP send error: %s" % e)
+            self.stderr.println("HTTP send error: %s" % e)
             return None, ""
 
     def run_login_suite(self, evt):
@@ -1398,7 +1637,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory):
             if change_url:
                 self.queue_manual("WSTG-ATHN-08", change_url, "Verify if password change requires current password and invalidates active sessions.")
         except Exception as e:
-            print("Error running WSTG password checks: %s" % e)
+            self.stderr.println("Error running WSTG password checks: %s" % e)
 
     def run_wstg_auth_bypass(self, evt):
         try:
