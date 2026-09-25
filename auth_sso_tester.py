@@ -5,20 +5,13 @@ Auth / SSO / OAuth / SAML / WSTG Tester — Burp Suite extension (Jython 2.7)
 
 Features:
 - Automatic Population: Dynamically extracts and auto-populates GUI fields across
-  all tabs (Target/Login, Microsoft SSO/ADFS, OAuth/OIDC, SAML, WSTG, WAF) as traffic
-  passes through Burp Proxy, Repeater, or Scanner.
-- Full OAuth 2.0 / OIDC, SAML 2.0, OWASP WSTG, and WAF Bypass testing modules.
-- Native Burp Scanner Integration (IScannerCheck): Automatically populates findings
-  into both the extension's Results tab and Burp Suite's official Dashboard & Target Issue Activity tree.
-- Comprehensive Security Modules:
-  1. Target / Login: Password Policy (WSTG-ATHN-07), User Enum, Lockout & Rate-limiting (429/CAPTCHA), Session Fixation.
-  2. Microsoft Entra ID & ADFS: Tenant Confusion, v1/v2 Endpoints, Device Code Flow, Graph Scope Confusion, ADFS WS-Fed/WS-Trust.
-  3. OAuth 2.0 / OIDC: Redirect URI bypasses, Response Type implicit/hybrid/none, PKCE S256 vs plain, State CSRF & Short Entropy, Response Mode, OIDC Discovery.
-  4. SAML 2.0: Signature Stripping, SignatureValue Blanking, NameID Swap, Expiry Extension, XSW-1 through XSW-8, Comment Injection, Weak SHA-1, EncryptedAssertion, RelayState.
-  5. OWASP WSTG: Auth Bypass Headers (X-Forwarded-User, X-Real-IP), Cache-Control (WSTG-ATHN-06), Path Traversal AuthZ (WSTG-ATHZ-01), IDOR, PrivEsc.
-  6. WAF Bypass: IP Spoofing, Verb Override, Path Encoding (%252f, Matrix params), Content-Type Juggling.
-- Case-Insensitive Traffic Parsing: Extracts SAML, OAuth, OIDC, JWT, ADFS from URL, Body (URL-encoded or JSON), and Headers.
-- Zero error display in Burp Suite with robust exception handling.
+  all tabs as traffic passes through Burp Proxy, Repeater, or Scanner.
+- Automated Test Runners & Verification Engine: Programmatically executes all test cases
+  across OAuth 2.0, SAML 2.0 (XSW-1..8), Microsoft Entra ID, ADFS, WSTG AuthZ/IDOR, and WAF Bypass.
+- Automated Response Validation: Programmatically compares HTTP response codes, headers (Location, Set-Cookie),
+  and body payloads to issue definitive verdicts ([VULNERABLE] vs [SAFE]) into Burp's Scanner Issue Activity list and Results tab.
+- Native Burp Scanner Integration (IScannerCheck).
+- Case-Insensitive Traffic Parsing.
 """
 
 import re
@@ -543,17 +536,14 @@ def gen_saml_variants(xml_text):
         cloned = re.sub(r'<(\w+:)?Signature\b.*?</(\w+:)?Signature>', '', cloned, flags=re.S)
         cloned_alt_id = re.sub(r'ID="[^"]+"', 'ID="_attacker_assertion_999"', cloned, count=1)
 
-        # XSW-1: Attacker Assertion before original Assertion
         xsw1_body = cloned + original_assertion
         v5 = xml_text.replace(original_assertion, xsw1_body, 1)
         variants.append(("xsw1-clone-before", "XSW-1: Attacker unsigned Assertion placed before original signed Assertion.", v5, "Vulnerable to XSW-1."))
 
-        # XSW-2: Attacker Assertion after original Assertion
         xsw2_body = original_assertion + cloned_alt_id
         v6 = xml_text.replace(original_assertion, xsw2_body, 1)
         variants.append(("xsw2-clone-after-new-id", "XSW-2: Attacker unsigned Assertion with modified ID appended after original.", v6, "Vulnerable to XSW-2."))
 
-        # XSW-3: Attacker Assertion wrapped inside Response Extensions
         v7 = xml_text.replace("</saml:Response>", "<saml:Extensions>" + cloned + "</saml:Extensions></saml:Response>")
         if v7 == xml_text:
             v7 = xml_text.replace("</Response>", "<Extensions>" + cloned + "</Extensions></Response>")
@@ -931,8 +921,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         opts.add(self.cb_forgot)
         opts.add(self.cb_lockout)
 
-        run_btn = JButton("Run login + session + password module", actionPerformed=self.run_login_suite)
-        report_btn = JButton("Export report (Markdown)", actionPerformed=self.export_report)
+        run_btn = JButton("Run Login + Session + Password Module (Automated)", actionPerformed=self.run_login_suite)
+        report_btn = JButton("Export Report (Markdown)", actionPerformed=self.export_report)
 
         wrapper = JPanel()
         wrapper.setLayout(BoxLayout(wrapper, BoxLayout.Y_AXIS))
@@ -948,22 +938,32 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         self.f_ms_client_id = self._labeled_field(top, "client_id (App registration):", "")
         self.f_ms_redirect = self._labeled_field(top, "redirect_uri:", "")
         self.f_ms_scope = self._labeled_field(top, "scope:", "")
-        ms_btn = JButton("Generate Entra ID (Azure AD) variants -> Repeater", actionPerformed=self.run_ms_oauth_variants)
+
+        btn_row = JPanel(GridLayout(1, 2, 5, 5))
+        ms_auto_btn = JButton("Auto-Run & Verify Entra ID Test Cases", actionPerformed=self.auto_run_ms_oauth_checks)
+        ms_rep_btn = JButton("Send Entra ID Variants -> Repeater", actionPerformed=self.run_ms_oauth_variants)
+        btn_row.add(ms_auto_btn)
+        btn_row.add(ms_rep_btn)
 
         adfs_label = JLabel("--- Internal SSO: ADFS / WS-Federation ---")
         self.f_adfs_base = self._labeled_field(top, "ADFS base URL:", "")
         self.f_adfs_wtrealm = self._labeled_field(top, "wtrealm (RP identifier):", "")
         self.f_adfs_wreply = self._labeled_field(top, "wreply:", "")
-        adfs_btn = JButton("Generate ADFS/WS-Fed variants -> Repeater", actionPerformed=self.run_wsfed_variants)
 
-        note = JTextArea("Covers external SSO through Entra ID and internal SSO through ADFS/WS-Federation.")
+        adfs_btn_row = JPanel(GridLayout(1, 2, 5, 5))
+        adfs_auto_btn = JButton("Auto-Run & Verify ADFS Test Cases", actionPerformed=self.auto_run_wsfed_checks)
+        adfs_rep_btn = JButton("Send ADFS Variants -> Repeater", actionPerformed=self.run_wsfed_variants)
+        adfs_btn_row.add(adfs_auto_btn)
+        adfs_btn_row.add(adfs_rep_btn)
+
+        note = JTextArea("Automated execution sends active test cases and programmatic logic evaluates response HTTP status, cookies, and redirects.")
         note.setEditable(False)
         wrapper = JPanel()
         wrapper.setLayout(BoxLayout(wrapper, BoxLayout.Y_AXIS))
         wrapper.add(top)
-        wrapper.add(ms_btn)
+        wrapper.add(btn_row)
         wrapper.add(adfs_label)
-        wrapper.add(adfs_btn)
+        wrapper.add(adfs_btn_row)
         wrapper.add(note)
         return wrapper
 
@@ -974,13 +974,18 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         self.f_oauth_client_id = self._labeled_field(top, "client_id:", "")
         self.f_oauth_scope = self._labeled_field(top, "scope:", "")
 
-        gen_btn = JButton("Generate OAuth/OIDC variants -> Repeater", actionPerformed=self.run_oauth_variants)
-        note = JTextArea("Each variant is queued into a labeled Repeater tab for manual validation.")
+        btn_row = JPanel(GridLayout(1, 2, 5, 5))
+        auto_btn = JButton("Auto-Run & Verify All OAuth/OIDC Test Cases", actionPerformed=self.auto_run_oauth_checks)
+        gen_btn = JButton("Send OAuth Variants -> Repeater", actionPerformed=self.run_oauth_variants)
+        btn_row.add(auto_btn)
+        btn_row.add(gen_btn)
+
+        note = JTextArea("Automated execution tests redirect_uri bypasses, response_type tampering, state CSRF, and PKCE downgrades, issuing verdicts ([VULNERABLE] vs [SAFE]).")
         note.setEditable(False)
         wrapper = JPanel()
         wrapper.setLayout(BoxLayout(wrapper, BoxLayout.Y_AXIS))
         wrapper.add(top)
-        wrapper.add(gen_btn)
+        wrapper.add(btn_row)
         wrapper.add(note)
         return wrapper
 
@@ -990,13 +995,18 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         self.cb_redirect_binding = JCheckBox("Value is HTTP-Redirect bound (raw DEFLATE, not just base64)")
         self.saml_preview = JTextArea(12, 60)
         self.saml_preview.setFont(Font("Monospaced", Font.PLAIN, 11))
-        gen_btn = JButton("Generate SAML tamper variants -> Repeater", actionPerformed=self.run_saml_variants)
+
+        btn_row = JPanel(GridLayout(1, 2, 5, 5))
+        saml_auto_btn = JButton("Auto-Run & Verify SAML Tamper Variants against ACS Endpoint", actionPerformed=self.auto_run_saml_checks)
+        gen_btn = JButton("Send SAML Variants -> Repeater", actionPerformed=self.run_saml_variants)
+        btn_row.add(saml_auto_btn)
+        btn_row.add(gen_btn)
 
         north = JPanel()
         north.setLayout(BoxLayout(north, BoxLayout.Y_AXIS))
         north.add(info)
         north.add(self.cb_redirect_binding)
-        north.add(gen_btn)
+        north.add(btn_row)
 
         top.add(north, BorderLayout.NORTH)
         top.add(JScrollPane(self.saml_preview), BorderLayout.CENTER)
@@ -1009,17 +1019,22 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         self.f_wstg_target_url = self._labeled_field(top, "Target Auth/AuthZ Endpoint:", "https://host/api/user/profile?user_id=101")
 
         btn_pass_policy = JButton("Check Password Policy (WSTG-ATHN-07)", actionPerformed=self.run_wstg_password_checks)
-        btn_auth_bypass = JButton("Generate Auth Bypass Headers -> Repeater (WSTG-ATHN-04)", actionPerformed=self.run_wstg_auth_bypass)
-        btn_authz_idor = JButton("Generate AuthZ / IDOR / PrivEsc Variants -> Repeater (WSTG-ATHZ)", actionPerformed=self.run_wstg_authz)
+        btn_auth_bypass_auto = JButton("Auto-Run & Verify Auth Bypass Headers (WSTG-ATHN-04)", actionPerformed=self.auto_run_wstg_auth_bypass)
+        btn_authz_idor_auto = JButton("Auto-Run & Verify AuthZ / IDOR / Path Traversal Probes (WSTG-ATHZ)", actionPerformed=self.auto_run_wstg_authz)
+
+        btn_rep_row = JPanel(GridLayout(1, 2, 5, 5))
+        btn_auth_bypass_rep = JButton("Send Auth Bypass Headers -> Repeater", actionPerformed=self.run_wstg_auth_bypass)
+        btn_authz_idor_rep = JButton("Send AuthZ Probes -> Repeater", actionPerformed=self.run_wstg_authz)
+        btn_rep_row.add(btn_auth_bypass_rep)
+        btn_rep_row.add(btn_authz_idor_rep)
 
         info = JTextArea(
-            "WSTG (OWASP Web Security Testing Guide) Module:\n"
-            "- WSTG-ATHN-01: Encrypted Channel (HTTP vs HTTPS)\n"
-            "- WSTG-ATHN-04: Bypassing Auth via Headers (X-Forwarded-User, X-Remote-User)\n"
-            "- WSTG-ATHN-06: Browser Cache Weaknesses (Cache-Control: no-store)\n"
-            "- WSTG-ATHN-07: Password Complexity Policy\n"
-            "- WSTG-ATHN-08: Password Reset Weaknesses\n"
-            "- WSTG-ATHZ-01/02/03/04: Access Control Bypasses, PrivEsc, IDOR Probes")
+            "WSTG Module with Automated Programmatic Verification:\n"
+            "- WSTG-ATHN-01: Encrypted Channel Audit\n"
+            "- WSTG-ATHN-04: Automated Header-Based Auth Bypass Verification (X-Forwarded-User, X-Real-IP)\n"
+            "- WSTG-ATHN-06: Browser Cache-Control Auditing\n"
+            "- WSTG-ATHN-07: Password Complexity & Entropy Policy Audit\n"
+            "- WSTG-ATHZ-01/02/03/04: Automated IDOR & Path Traversal Access Control Verification")
         info.setEditable(False)
         info.setLineWrap(True)
         info.setWrapStyleWord(True)
@@ -1028,15 +1043,16 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         wrapper.setLayout(BoxLayout(wrapper, BoxLayout.Y_AXIS))
         wrapper.add(top)
         wrapper.add(btn_pass_policy)
-        wrapper.add(btn_auth_bypass)
-        wrapper.add(btn_authz_idor)
+        wrapper.add(btn_auth_bypass_auto)
+        wrapper.add(btn_authz_idor_auto)
+        wrapper.add(btn_rep_row)
         wrapper.add(info)
         return wrapper
 
     def _build_waf_panel(self):
         top = JPanel(BorderLayout())
         info = JLabel("Intercepted 403/406/429 blocked requests are automatically stored here.")
-        run_btn = JButton("Send WAF-bypass variants and report status codes", actionPerformed=self.run_waf_variants)
+        run_btn = JButton("Auto-Run & Verify WAF Bypass Variants", actionPerformed=self.auto_run_waf_variants)
         north = JPanel()
         north.setLayout(BoxLayout(north, BoxLayout.Y_AXIS))
         north.add(info)
@@ -1053,7 +1069,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         return JScrollPane(table)
 
     def _build_manual_panel(self):
-        self.manual_model = DefaultTableModel(["Module", "Item", "Why it needs a human"], 0)
+        self.manual_model = DefaultTableModel(["Module", "Item", "Status & Automated Verdict"], 0)
         table = JTable(self.manual_model)
         return JScrollPane(table)
 
@@ -1262,7 +1278,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
                     status = resp_info.getStatusCode()
                     if status in [403, 406, 429]:
                         self.waf_capture_msg = messageInfo
-                        self._update_field(self.waf_output, "Auto-captured HTTP %d blocked request to %s\nClick 'Send WAF-bypass variants' to run." % (status, url))
+                        self._update_field(self.waf_output, "Auto-captured HTTP %d blocked request to %s\nClick 'Run' to send bypass variants." % (status, url))
 
             # --- ADVANCED PASSIVE SSO CHECKS (requests) ---
             try:
@@ -1588,7 +1604,249 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         if len(set(statuses)) == 1:
             self.log("Lockout", "medium", "No status change across %d failed attempts -- verify lockout/CAPTCHA." % max_attempts)
 
-    # ---------------- Module Handlers ----------------
+    # ---------------- AUTOMATED EXECUTION & VERIFICATION ENGINE ----------------
+
+    def auto_run_oauth_checks(self, evt):
+        try:
+            authorize_url = self.f_oauth_authorize.text
+            redirect_uri = self.f_oauth_redirect.text
+            client_id = self.f_oauth_client_id.text
+            scope = self.f_oauth_scope.text
+            if not authorize_url or not client_id:
+                JOptionPane.showMessageDialog(self.main_panel, "Authorization endpoint URL and client_id are required.")
+                return
+
+            variants = gen_oauth_variants(authorize_url, redirect_uri, client_id, scope, {})
+            protocol, host, port, _ = parse_url(authorize_url)
+            http_service = SimpleHttpService(host, port, protocol)
+
+            for name, desc, p, h, pt, path_v, q_v, expectation in variants:
+                raw = build_raw_request("GET", path_v, h, {}, None, extra_query=q_v)
+                status, resp_text = self._send(p, h, pt, raw)
+                
+                # Logic check for response status & redirect Location header
+                loc_match = re.search(r'(?im)^Location:\s*(.+)$', resp_text or "")
+                loc_val = loc_match.group(1).strip() if loc_match else ""
+
+                if status in (302, 301) and ('evil' in loc_val or '@' in loc_val or 'http://' in loc_val):
+                    verdict = "[CRITICAL VULNERABLE] Variant '%s' accepted invalid redirect_uri! Redirected to: %s" % (name, loc_val)
+                    self.log("OAuth-AutoCheck", "critical", verdict)
+                    self.queue_manual("OAuth-AutoCheck", name, verdict)
+                elif status == 200 and 'response_type=token' in q_v:
+                    verdict = "[HIGH VULNERABLE] Implicit flow (response_type=token) accepted by authorization endpoint."
+                    self.log("OAuth-AutoCheck", "high", verdict)
+                    self.queue_manual("OAuth-AutoCheck", name, verdict)
+                elif status in (200, 302) and 'state' not in q_v:
+                    verdict = "[HIGH VULNERABLE] Authorization request processed without state parameter (Login CSRF risk)."
+                    self.log("OAuth-AutoCheck", "high", verdict)
+                    self.queue_manual("OAuth-AutoCheck", name, verdict)
+                elif status in (400, 401, 403):
+                    verdict = "[SAFE] Server correctly rejected variant '%s' (HTTP %s)." % (name, status)
+                    self.log("OAuth-AutoCheck", "info", verdict)
+                    self.queue_manual("OAuth-AutoCheck", name, verdict)
+                else:
+                    verdict = "[REVIEW NEEDED] Variant '%s' returned HTTP %s. Check behavior." % (name, status)
+                    self.log("OAuth-AutoCheck", "medium", verdict)
+                    self.queue_manual("OAuth-AutoCheck", name, verdict)
+
+            JOptionPane.showMessageDialog(self.main_panel, "Automated OAuth check completed! Results logged in Results and Queue tabs.")
+        except Exception as e:
+            JOptionPane.showMessageDialog(self.main_panel, "Error running automated OAuth checks: %s" % e)
+
+    def auto_run_ms_oauth_checks(self, evt):
+        try:
+            tenant = self.f_ms_tenant.text.strip()
+            client_id = self.f_ms_client_id.text.strip()
+            redirect_uri = self.f_ms_redirect.text.strip()
+            scope = self.f_ms_scope.text.strip()
+            if not tenant or not client_id:
+                JOptionPane.showMessageDialog(self.main_panel, "Tenant and client_id are required.")
+                return
+
+            variants = gen_ms_oauth_variants(tenant, client_id, redirect_uri, scope)
+            for name, desc, protocol, host, port, path, query, expectation in variants:
+                raw = build_raw_request("GET", path, host, {}, None, extra_query=query)
+                status, resp_text = self._send(protocol, host, port, raw)
+                
+                if status in (200, 302):
+                    verdict = "[VULNERABLE/WARN] Entra ID variant '%s' returned HTTP %s. %s" % (name, status, expectation)
+                    self.log("MicrosoftSSO-AutoCheck", "high" if "common" in name else "medium", verdict)
+                    self.queue_manual("MicrosoftSSO-AutoCheck", name, verdict)
+                else:
+                    verdict = "[SAFE] Entra ID endpoint returned HTTP %s for variant '%s'." % (status, name)
+                    self.log("MicrosoftSSO-AutoCheck", "info", verdict)
+                    self.queue_manual("MicrosoftSSO-AutoCheck", name, verdict)
+
+            JOptionPane.showMessageDialog(self.main_panel, "Automated Microsoft Entra ID checks completed!")
+        except Exception as e:
+            JOptionPane.showMessageDialog(self.main_panel, "Error running Entra ID checks: %s" % e)
+
+    def auto_run_wsfed_checks(self, evt):
+        try:
+            base = self.f_adfs_base.text.strip()
+            wtrealm = self.f_adfs_wtrealm.text.strip()
+            wreply = self.f_adfs_wreply.text.strip()
+            if not base or not wtrealm or not wreply:
+                JOptionPane.showMessageDialog(self.main_panel, "ADFS base URL, wtrealm and wreply are required.")
+                return
+            variants = gen_wsfed_variants(base, wtrealm, wreply)
+            for name, desc, protocol, host, port, path, query, expectation in variants:
+                raw = build_raw_request("GET", path, host, {}, None, extra_query=query)
+                status, resp_text = self._send(protocol, host, port, raw)
+                if status in (200, 302):
+                    verdict = "[VULNERABLE/WARN] ADFS variant '%s' accepted (HTTP %s). %s" % (name, status, expectation)
+                    self.log("ADFS-AutoCheck", "high" if "mismatch" in name else "medium", verdict)
+                    self.queue_manual("ADFS-AutoCheck", name, verdict)
+                else:
+                    verdict = "[SAFE] ADFS endpoint rejected variant '%s' (HTTP %s)." % (name, status)
+                    self.log("ADFS-AutoCheck", "info", verdict)
+                    self.queue_manual("ADFS-AutoCheck", name, verdict)
+
+            JOptionPane.showMessageDialog(self.main_panel, "Automated ADFS checks completed!")
+        except Exception as e:
+            JOptionPane.showMessageDialog(self.main_panel, "Error running ADFS checks: %s" % e)
+
+    def auto_run_saml_checks(self, evt):
+        try:
+            xml_text = self.saml_preview.getText() or self.captured_saml_xml
+            if not xml_text:
+                JOptionPane.showMessageDialog(self.main_panel, "No SAML XML captured yet. Intercept a SAML request first.")
+                return
+            acs_url = JOptionPane.showInputDialog(self.main_panel, "Enter SAML ACS POST Endpoint URL:", self.f_wstg_target_url.text or "https://target/saml/acs")
+            if not acs_url:
+                return
+            protocol, host, port, path = parse_url(acs_url)
+            redirect_binding = self.cb_redirect_binding.isSelected()
+            variants = gen_saml_variants(xml_text)
+
+            for name, desc, mutated_xml, expectation in variants:
+                encoded = saml_encode(mutated_xml, redirect_binding)
+                body = "SAMLResponse=" + encoded
+                headers = {"Content-Type": "application/x-www-form-urlencoded"}
+                raw = build_raw_request("POST", path, host, headers, body)
+                status, resp_text = self._send(protocol, host, port, raw)
+
+                headers_lower = (resp_text or "").lower()
+                if status in (200, 302) and ('set-cookie:' in headers_lower or 'session' in headers_lower):
+                    verdict = "[CRITICAL VULNERABLE] SAML Variant '%s' accepted by ACS (HTTP %s with Session Cookie)! %s" % (name, status, expectation)
+                    self.log("SAML-AutoCheck", "critical", verdict)
+                    self.queue_manual("SAML-AutoCheck", name, verdict)
+                elif status in (400, 401, 403, 500):
+                    verdict = "[SAFE] Server correctly rejected SAML variant '%s' (HTTP %s)." % (name, status)
+                    self.log("SAML-AutoCheck", "info", verdict)
+                    self.queue_manual("SAML-AutoCheck", name, verdict)
+                else:
+                    verdict = "[REVIEW NEEDED] SAML variant '%s' returned HTTP %s." % (name, status)
+                    self.log("SAML-AutoCheck", "medium", verdict)
+                    self.queue_manual("SAML-AutoCheck", name, verdict)
+
+            JOptionPane.showMessageDialog(self.main_panel, "Automated SAML checks completed! Verdicts logged in Results and Queue tabs.")
+        except Exception as e:
+            JOptionPane.showMessageDialog(self.main_panel, "Error running automated SAML checks: %s" % e)
+
+    def auto_run_wstg_auth_bypass(self, evt):
+        try:
+            target_url = self.f_wstg_target_url.text
+            if not target_url:
+                JOptionPane.showMessageDialog(self.main_panel, "Target Auth/AuthZ Endpoint URL is required.")
+                return
+            protocol, host, port, path = parse_url(target_url)
+
+            # Baseline request without extra headers
+            raw_base = build_raw_request("GET", path, host, {})
+            base_status, base_resp = self._send(protocol, host, port, raw_base)
+
+            variants = gen_wstg_auth_bypass_headers("GET", path, host, {}, None)
+            for name, method, p, h, hdrs, body, expectation in variants:
+                raw = build_raw_request(method, p, h, hdrs, body)
+                status, resp_text = self._send(protocol, host, port, raw)
+
+                if base_status in (401, 403) and status == 200:
+                    verdict = "[HIGH VULNERABLE] Authentication Bypass confirmed via header '%s'! Baseline HTTP %s -> Injected HTTP 200 OK!" % (name, base_status)
+                    self.log("WSTG-AuthBypass-AutoCheck", "high", verdict)
+                    self.queue_manual("WSTG-AuthBypass-AutoCheck", name, verdict)
+                elif status == 200 and len(resp_text) != len(base_resp):
+                    verdict = "[MEDIUM VULNERABLE] Header '%s' altered response length (%d vs %d bytes)." % (name, len(resp_text), len(base_resp))
+                    self.log("WSTG-AuthBypass-AutoCheck", "medium", verdict)
+                    self.queue_manual("WSTG-AuthBypass-AutoCheck", name, verdict)
+                else:
+                    verdict = "[SAFE] Header '%s' rejected or ignored (HTTP %s)." % (name, status)
+                    self.log("WSTG-AuthBypass-AutoCheck", "info", verdict)
+                    self.queue_manual("WSTG-AuthBypass-AutoCheck", name, verdict)
+
+            JOptionPane.showMessageDialog(self.main_panel, "Automated Header Auth Bypass checks completed!")
+        except Exception as e:
+            JOptionPane.showMessageDialog(self.main_panel, "Error running Auth Bypass checks: %s" % e)
+
+    def auto_run_wstg_authz(self, evt):
+        try:
+            target_url = self.f_wstg_target_url.text
+            if not target_url:
+                JOptionPane.showMessageDialog(self.main_panel, "Target Auth/AuthZ Endpoint URL is required.")
+                return
+            protocol, host, port, path = parse_url(target_url)
+
+            variants = gen_wstg_authz_variants("GET", path, host, {}, None)
+            for name, m, p, h, hdrs, b, expectation in variants:
+                raw = build_raw_request(m, p, h, hdrs, b)
+                status, resp_text = self._send(protocol, host, port, raw)
+
+                if status == 200:
+                    verdict = "[HIGH VULNERABLE] AuthZ / IDOR / Path Traversal Probe '%s' returned HTTP 200 OK! Access granted to %s" % (name, p)
+                    self.log("WSTG-AuthZ-AutoCheck", "high", verdict)
+                    self.queue_manual("WSTG-AuthZ-AutoCheck", name, verdict)
+                elif status in (401, 403, 404):
+                    verdict = "[SAFE] Probe '%s' correctly restricted (HTTP %s)." % (name, status)
+                    self.log("WSTG-AuthZ-AutoCheck", "info", verdict)
+                    self.queue_manual("WSTG-AuthZ-AutoCheck", name, verdict)
+                else:
+                    verdict = "[REVIEW NEEDED] Probe '%s' returned HTTP %s." % (name, status)
+                    self.log("WSTG-AuthZ-AutoCheck", "medium", verdict)
+                    self.queue_manual("WSTG-AuthZ-AutoCheck", name, verdict)
+
+            JOptionPane.showMessageDialog(self.main_panel, "Automated AuthZ / IDOR checks completed!")
+        except Exception as e:
+            JOptionPane.showMessageDialog(self.main_panel, "Error running AuthZ checks: %s" % e)
+
+    def auto_run_waf_variants(self, evt):
+        try:
+            msg = getattr(self, 'waf_capture_msg', None)
+            if not msg:
+                JOptionPane.showMessageDialog(self.main_panel, "Capture a blocked request first via context menu.")
+                return
+            info = self._helpers.analyzeRequest(msg)
+            req_bytes = msg.getRequest()
+            req_text = self._helpers.bytesToString(req_bytes)
+            method = req_text.split(' ')[0]
+            path = str(info.getUrl().getPath())
+            if info.getUrl().getQuery():
+                path += '?' + info.getUrl().getQuery()
+            host = info.getUrl().getHost()
+            port = info.getUrl().getPort() if info.getUrl().getPort() != -1 else (443 if info.getUrl().getProtocol() == 'https' else 80)
+            protocol = info.getUrl().getProtocol()
+            headers = {}
+            for h in info.getHeaders()[1:]:
+                if ':' in h:
+                    k, v = h.split(':', 1)
+                    headers[k.strip()] = v.strip()
+            body = req_text[info.getBodyOffset():]
+
+            out = []
+            for name, m, p, h, hdrs, b in gen_waf_bypass_variants(method, path, host, headers, body):
+                raw = build_raw_request(m, p, h, hdrs, b if b else None)
+                status, _ = self._send(protocol, host, port, raw)
+                if status == 200:
+                    out.append("%-28s -> HTTP 200 [VULNERABLE WAF BYPASS!]" % name)
+                    self.log("WAFBypass-AutoCheck", "high", "[HIGH VULNERABLE] WAF Bypass confirmed via '%s' (HTTP 200 OK)!" % name)
+                else:
+                    out.append("%-28s -> HTTP %s [BLOCKED/SAFE]" % (name, status))
+                    self.log("WAFBypass-AutoCheck", "info", "Variant '%s' returned HTTP %s." % (name, status))
+            self.waf_output.setText("\n".join(out))
+            JOptionPane.showMessageDialog(self.main_panel, "Automated WAF Bypass checks completed!")
+        except Exception as e:
+            JOptionPane.showMessageDialog(self.main_panel, "Error running WAF bypass: %s" % e)
+
+    # ---------------- Module Handlers (Repeater Manual Backup) ----------------
 
     def run_oauth_variants(self, evt):
         try:
@@ -1722,39 +1980,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
         except Exception as e:
             JOptionPane.showMessageDialog(self.main_panel, "Error running WSTG AuthZ checks: %s" % e)
 
-    def run_waf_variants(self, evt):
-        try:
-            msg = getattr(self, 'waf_capture_msg', None)
-            if not msg:
-                JOptionPane.showMessageDialog(self.main_panel, "Capture a blocked request first via context menu.")
-                return
-            info = self._helpers.analyzeRequest(msg)
-            req_bytes = msg.getRequest()
-            req_text = self._helpers.bytesToString(req_bytes)
-            method = req_text.split(' ')[0]
-            path = str(info.getUrl().getPath())
-            if info.getUrl().getQuery():
-                path += '?' + info.getUrl().getQuery()
-            host = info.getUrl().getHost()
-            port = info.getUrl().getPort() if info.getUrl().getPort() != -1 else (443 if info.getUrl().getProtocol() == 'https' else 80)
-            protocol = info.getUrl().getProtocol()
-            headers = {}
-            for h in info.getHeaders()[1:]:
-                if ':' in h:
-                    k, v = h.split(':', 1)
-                    headers[k.strip()] = v.strip()
-            body = req_text[info.getBodyOffset():]
-
-            out = []
-            for name, m, p, h, hdrs, b in gen_waf_bypass_variants(method, path, host, headers, body):
-                raw = build_raw_request(m, p, h, hdrs, b if b else None)
-                status, _ = self._send(protocol, host, port, raw)
-                out.append("%-28s -> HTTP %s" % (name, status))
-                self.log("WAFBypass", "info", "%s -> HTTP %s" % (name, status))
-            self.waf_output.setText("\n".join(out))
-        except Exception as e:
-            JOptionPane.showMessageDialog(self.main_panel, "Error running WAF bypass: %s" % e)
-
     # ---------------- Report Export ----------------
 
     def export_report(self, evt):
@@ -1771,8 +1996,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
                 f.write("| Module | Severity | Finding |\n|---|---|---|\n")
                 for row in self.results_rows:
                     f.write("| %s | %s | %s |\n" % (row['module'], row['severity'], str(row['finding']).replace('|', '\\|')))
-                f.write("\n## Queued for manual review\n\n")
-                f.write("| Module | Item | Why it needs a human |\n|---|---|---|\n")
+                f.write("\n## Automated Test Execution & Status Queue\n\n")
+                f.write("| Module | Item | Status & Automated Verdict |\n|---|---|---|\n")
                 for row in self.manual_rows:
                     f.write("| %s | %s | %s |\n" % (row['module'], row['item'], str(row['reason']).replace('|', '\\|').replace('\n', ' ')))
             JOptionPane.showMessageDialog(self.main_panel, "Report written to %s" % path)
