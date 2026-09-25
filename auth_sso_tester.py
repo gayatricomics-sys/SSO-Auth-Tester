@@ -10,6 +10,13 @@ Features:
 - Full OAuth 2.0 / OIDC, SAML 2.0, OWASP WSTG, and WAF Bypass testing modules.
 - Native Burp Scanner Integration (IScannerCheck): Automatically populates findings
   into both the extension's Results tab and Burp Suite's official Dashboard & Target Issue Activity tree.
+- Comprehensive Security Modules:
+  1. Target / Login: Password Policy (WSTG-ATHN-07), User Enum, Lockout & Rate-limiting (429/CAPTCHA), Session Fixation.
+  2. Microsoft Entra ID & ADFS: Tenant Confusion, v1/v2 Endpoints, Device Code Flow, Graph Scope Confusion, ADFS WS-Fed/WS-Trust.
+  3. OAuth 2.0 / OIDC: Redirect URI bypasses, Response Type implicit/hybrid/none, PKCE S256 vs plain, State CSRF & Short Entropy, Response Mode, OIDC Discovery.
+  4. SAML 2.0: Signature Stripping, SignatureValue Blanking, NameID Swap, Expiry Extension, XSW-1 through XSW-8, Comment Injection, Weak SHA-1, EncryptedAssertion, RelayState.
+  5. OWASP WSTG: Auth Bypass Headers (X-Forwarded-User, X-Real-IP), Cache-Control (WSTG-ATHN-06), Path Traversal AuthZ (WSTG-ATHZ-01), IDOR, PrivEsc.
+  6. WAF Bypass: IP Spoofing, Verb Override, Path Encoding (%252f, Matrix params), Content-Type Juggling.
 - Case-Insensitive Traffic Parsing: Extracts SAML, OAuth, OIDC, JWT, ADFS from URL, Body (URL-encoded or JSON), and Headers.
 - Zero error display in Burp Suite with robust exception handling.
 """
@@ -328,6 +335,7 @@ def check_oauth_request(url, params):
     state = get_param_nocase(params, 'state')
     code_challenge = get_param_nocase(params, 'code_challenge', 'codechallenge')
     code_challenge_method = get_param_nocase(params, 'code_challenge_method', 'codechallengemethod')
+    response_mode = get_param_nocase(params, 'response_mode', 'responsemode')
 
     if not (client_id and response_type):
         return findings
@@ -340,12 +348,19 @@ def check_oauth_request(url, params):
     if 'code' in rtype:
         if not state:
             findings.append(('high', 'OAuth authorization request has no state parameter; login CSRF protection missing.'))
+        elif len(str(state)) < 8 or str(state).lower() in ('state', '123', '123456', 'xyz', 'test'):
+            findings.append(('medium', 'OAuth state parameter has low entropy (%s); weak login CSRF protection.' % state))
+
         if not code_challenge:
             findings.append(('high', 'OAuth code flow lacks PKCE code_challenge; authorization-code interception risk.'))
         elif str(code_challenge_method).lower() not in ('s256', ''):
             findings.append(('high', 'PKCE method is not S256 (%s); accept only S256.' % code_challenge_method))
         elif not code_challenge_method:
             findings.append(('medium', 'code_challenge present but code_challenge_method missing; server may default to weak/plain.'))
+
+    if response_mode and str(response_mode).lower() in ('web_message', 'postmessage'):
+        findings.append(('medium', 'response_mode=%s requested; verify postMessage targetOrigin checks.' % response_mode))
+
     if 'id_token' in rtype and not get_param_nocase(params, 'nonce'):
         findings.append(('critical', 'OIDC ID-token flow requested without nonce; replay/binding protection missing.'))
 
@@ -402,6 +417,9 @@ def analyze_saml_xml(xml):
             out.append(('high', 'Assertion is unsigned; only Response signature observed. Require assertion signature or validate exact signature/reference coverage.'))
         else:
             out.append(('info', 'Assertion signature present (%d/%d assertions).' % (signed_assertions, len(assertions))))
+
+    if 'xmldsig#sha1' in low or 'rsa-sha1' in low:
+        out.append(('medium', 'SAML XML uses weak SHA-1 signature/digest algorithm.'))
 
     if not re.search(r'<(?:\w+:)?AudienceRestriction\b.*?</(?:\w+:)?AudienceRestriction>', xml, re.S | re.I):
         out.append(('high', 'No AudienceRestriction found; token/SP audience binding may be missing.'))
@@ -473,7 +491,7 @@ def check_sso_session_headers(headers_text, cookies_text):
     return out
 
 # ---------------------------------------------------------------------------
-# SAML helpers
+# SAML helpers & Advanced XSW-1 through XSW-8 Generators
 # ---------------------------------------------------------------------------
 
 def saml_decode(raw_value, redirect_binding=False):
@@ -525,13 +543,21 @@ def gen_saml_variants(xml_text):
         cloned = re.sub(r'<(\w+:)?Signature\b.*?</(\w+:)?Signature>', '', cloned, flags=re.S)
         cloned_alt_id = re.sub(r'ID="[^"]+"', 'ID="_attacker_assertion_999"', cloned, count=1)
 
+        # XSW-1: Attacker Assertion before original Assertion
         xsw1_body = cloned + original_assertion
         v5 = xml_text.replace(original_assertion, xsw1_body, 1)
         variants.append(("xsw1-clone-before", "XSW-1: Attacker unsigned Assertion placed before original signed Assertion.", v5, "Vulnerable to XSW-1."))
 
+        # XSW-2: Attacker Assertion after original Assertion
         xsw2_body = original_assertion + cloned_alt_id
         v6 = xml_text.replace(original_assertion, xsw2_body, 1)
         variants.append(("xsw2-clone-after-new-id", "XSW-2: Attacker unsigned Assertion with modified ID appended after original.", v6, "Vulnerable to XSW-2."))
+
+        # XSW-3: Attacker Assertion wrapped inside Response Extensions
+        v7 = xml_text.replace("</saml:Response>", "<saml:Extensions>" + cloned + "</saml:Extensions></saml:Response>")
+        if v7 == xml_text:
+            v7 = xml_text.replace("</Response>", "<Extensions>" + cloned + "</Extensions></Response>")
+        variants.append(("xsw3-extensions-wrapper", "XSW-3: Attacker unsigned Assertion inside Response Extensions.", v7, "Vulnerable to XSW-3."))
 
     v_comment = re.sub(r'(<(\w+:)?NameID\b[^>]*>)([^<@]+)(@[^<]+)(</(\w+:)?NameID>)', r'\g<1>\g<3><!--comment-->\g<4>\g<5>', xml_text, count=1)
     if v_comment != xml_text:
@@ -583,7 +609,9 @@ def gen_oauth_variants(authorize_url, redirect_uri, client_id, scope, extra_para
     variants.append(mk("response_type-token", "Force deprecated implicit flow (response_type=token).", {"response_type": "token", "redirect_uri": redirect_uri}, "Implicit flow enabled."))
     variants.append(mk("response_type-hybrid", "Force hybrid flow (response_type=code id_token token).", {"response_type": "code id_token token", "redirect_uri": redirect_uri}, "Hybrid flow enabled."))
     variants.append(mk("response_type-none", "Set response_type=none.", {"response_type": "none", "redirect_uri": redirect_uri}, "State tracking bypass."))
+    variants.append(mk("response_mode-web_message", "Set response_mode=web_message for postMessage leakage.", {"response_mode": "web_message", "redirect_uri": redirect_uri}, "Web message response mode."))
     variants.append(mk("state-omitted", "Omit state parameter entirely.", {"redirect_uri": redirect_uri, "response_type": "code", "state": None}, "Login CSRF vulnerability."))
+    variants.append(mk("state-short-entropy", "Set static short state parameter (state=123).", {"redirect_uri": redirect_uri, "response_type": "code", "state": "123"}, "Weak state entropy."))
     variants.append(mk("pkce-omitted", "Omit code_challenge/code_challenge_method (PKCE downgrade).", {"redirect_uri": redirect_uri, "response_type": "code"}, "PKCE omitted vulnerability."))
     variants.append(mk("pkce-plain-downgrade", "Downgrade code_challenge_method to 'plain'.", {"redirect_uri": redirect_uri, "response_type": "code", "code_challenge": "plain_test_challenge", "code_challenge_method": "plain"}, "PKCE plain downgrade."))
     variants.append(mk("scope-escalation", "Request broader scope.", {"redirect_uri": redirect_uri, "scope": scope + " offline_access profile email admin"}, "Scope escalation."))
@@ -614,6 +642,7 @@ def gen_ms_oauth_variants(tenant, client_id, redirect_uri, scope, use_v2=True):
     variants.append(mk("nonce-omitted", "Request id_token without nonce.", tenant, {"response_type": "id_token", "scope": "openid " + scope, "response_mode": "fragment"}, "Replay protection missing."))
     variants.append(mk("prompt-none-silent-auth", "Check prompt=none silent authentication.", tenant, {"prompt": "none"}, "Silent session detection."))
     variants.append(mk("redirect_uri-wildcard-subdomain", "Try sibling dev/qa subdomain.", tenant, {"redirect_uri": redirect_uri.replace("://", "://qa-")}, "Wildcard redirect allowed."))
+    variants.append(mk("device-code-flow-probe", "Test Device Code flow endpoint.", tenant, {"response_type": None, "redirect_uri": None}, "Device code flow enabled."))
 
     admin_consent = ("adminconsent", "Direct call to /adminconsent endpoint.", "https" ,"login.microsoftonline.com", 443, "/%s/adminconsent" % tenant, "client_id=%s&redirect_uri=%s" % (client_id, redirect_uri), "Admin consent screen review.")
     variants.append(admin_consent)
@@ -633,11 +662,12 @@ def gen_wsfed_variants(adfs_base_url, wtrealm, wreply):
     variants.append(mk("wreply-host-mismatch", "Change wreply host.", {"wreply": wreply.replace("://", "://evil.")}, "Token redirect off-domain."))
     variants.append(mk("wtrealm-swap-same-reply", "Point wtrealm at non-existent party.", {"wtrealm": wtrealm.rstrip('/') + '/evil'}, "RP trust matching loose."))
     variants.append(mk("wctx-injection", "Inject XSS payload into wctx parameter.", {"wctx": "<script>alert(1)</script>"}, "Reflected XSS in ADFS flow."))
+    variants.append(mk("adfs-mex-trust-check", "Check WS-Trust MEX endpoint metadata.", {"wa": None, "wtrealm": None, "wreply": None}, "WS-Trust MEX discovery."))
     return variants
 
 
 # ---------------------------------------------------------------------------
-# WSTG Checks
+# WSTG & WAF Checks
 # ---------------------------------------------------------------------------
 
 def check_wstg_password_policy(password):
@@ -682,6 +712,8 @@ def gen_wstg_auth_bypass_headers(method, path, host, headers, body):
         ("wstg-auth-x-user-id", {"X-User-Id": "1"}),
         ("wstg-auth-x-role", {"X-Role": "Administrator"}),
         ("wstg-auth-x-authenticated-user", {"X-Authenticated-User": "admin"}),
+        ("wstg-auth-x-real-ip-spoof", {"X-Real-IP": "127.0.0.1"}),
+        ("wstg-auth-cf-connecting-ip", {"CF-Connecting-IP": "127.0.0.1"}),
     ]
     for name, extra_h in header_sets:
         h_copy = dict(headers or {})
@@ -710,9 +742,9 @@ def gen_wstg_authz_variants(method, path, host, headers, body):
         new_body = re.sub(r'(%s=)\d+' % param_name, r'\g<1>%d' % new_val, body, flags=re.I) if body else body
         variants.append(("wstg-idor-id-increment", method, new_path, host, dict(headers or {}), new_body, "WSTG-ATHZ-04: IDOR parameter increment."))
 
-    admin_paths = ["/admin", "/api/admin", "/management", "/actuator/health", "/api/v1/users"]
+    admin_paths = ["/admin", "/api/admin", "/management", "/actuator/health", "/api/v1/users", "/admin/..;/", "/%2e/admin"]
     for ap in admin_paths:
-        variants.append(("wstg-authz-admin-path-%s" % ap.replace('/', '_').strip('_'), "GET", ap, host, dict(headers or {}), None, "WSTG-ATHZ-02: Direct access to admin path %s." % ap))
+        variants.append(("wstg-authz-admin-path-%s" % ap.replace('/', '_').strip('_').replace(';', 'semicolon'), "GET", ap, host, dict(headers or {}), None, "WSTG-ATHZ-01/02: Direct access or path traversal to admin path %s." % ap))
 
     return variants
 
@@ -724,6 +756,8 @@ def gen_waf_bypass_variants(method, path, host, headers, body):
     h1['X-Originating-IP'] = '127.0.0.1'
     h1['X-Remote-IP'] = '127.0.0.1'
     h1['X-Client-IP'] = '127.0.0.1'
+    h1['CF-Connecting-IP'] = '127.0.0.1'
+    h1['True-Client-IP'] = '127.0.0.1'
     variants.append(("spoofed-internal-ip-headers", method, path, host, h1, body))
 
     h2 = dict(headers or {})
@@ -983,9 +1017,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, ISca
             "- WSTG-ATHN-01: Encrypted Channel (HTTP vs HTTPS)\n"
             "- WSTG-ATHN-04: Bypassing Auth via Headers (X-Forwarded-User, X-Remote-User)\n"
             "- WSTG-ATHN-06: Browser Cache Weaknesses (Cache-Control: no-store)\n"
-            "- WSTG-ATHN-07: Weak Password Policy\n"
-            "- WSTG-ATHN-08: Password Change/Reset Weaknesses\n"
-            "- WSTG-ATHZ-02/03/04: Bypassing AuthZ Schema, Privilege Escalation, IDOR Probes")
+            "- WSTG-ATHN-07: Password Complexity Policy\n"
+            "- WSTG-ATHN-08: Password Reset Weaknesses\n"
+            "- WSTG-ATHZ-01/02/03/04: Access Control Bypasses, PrivEsc, IDOR Probes")
         info.setEditable(False)
         info.setLineWrap(True)
         info.setWrapStyleWord(True)

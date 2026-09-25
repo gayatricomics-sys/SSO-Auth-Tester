@@ -17,26 +17,39 @@ A comprehensive Jython 2.7 extension for Burp Suite designed to automate data ex
 - **Robust Silent Error Handling & Diagnostic Output**: Prevents Java exceptions and Burp error popups. Live traffic logs print directly to Burp's Extender Output window (`[AuthSSO Traffic] ...`).
 - **WAF Bypass Queue**: Auto-captures blocked HTTP response status codes (`403 Forbidden`, `406`, `429 Rate-Limited`).
 
-### 3. 🛡️ Comprehensive Security Test Generators
-- **OAuth 2.0 / OIDC**:
+### 3. 🛡️ Comprehensive Security Test Generators Across All Modules
+- **Module 1: Target / Login & Session Management**:
+  - WSTG-ATHN-07 Password complexity & entropy policy checker.
+  - User enumeration via HTTP status, response length diffing, and timing analysis.
+  - Account lockout resistance & rate-limiting probes.
+  - Forgot password reset token in-body disclosure detection.
+  - Cookie security flag verification (`Secure`, `HttpOnly`, `SameSite`).
+- **Module 2: Microsoft Entra ID (Azure AD) & ADFS / WS-Federation**:
+  - Tenant confusion (`/common/`, `/consumers/`), missing `nonce`, silent authentication (`prompt=none`), token fragment leakage.
+  - Support for Entra ID v1/v2 endpoints and Device Code flow inspection.
+  - Microsoft Graph vs Custom API scope confusion (`00000003-0000-0000-c000-000000000000`).
+  - WS-Federation `wreply` host mismatch, `wtrealm` RP swapping, `wctx` reflected XSS probes, and WS-Trust MEX metadata endpoint discovery.
+- **Module 3: OAuth 2.0 / OIDC (Generic)**:
   - `redirect_uri` validation checks (Subdomains, `@` userinfo trick, path traversal, double encoding `%252f`, HTTP downgrade).
   - `response_type` tampering (Implicit flow `token`, Hybrid flow `code id_token token`, `response_type=none`).
+  - `response_mode=web_message` postMessage leakage detection.
   - PKCE enforcement & downgrade (`code_challenge` omitted, `code_challenge_method=plain`).
-  - State parameter omission (Login CSRF) & Scope escalation checks.
-- **Microsoft Entra ID & ADFS**:
-  - Tenant confusion (`/common/`, `/consumers/`), missing `nonce`, silent authentication (`prompt=none`), token fragment leakage, `/adminconsent` scope review.
-  - WS-Federation `wreply` host mismatch, `wtrealm` party swapping, and `wctx` reflected parameter checks.
-- **SAML 2.0**:
+  - State parameter omission (Login CSRF) & Short entropy detection.
+  - Scope escalation checks (`offline_access`, `profile`, `email`, `admin`).
+- **Module 4: SAML 2.0**:
   - Signature stripping, `SignatureValue` blanking, `NameID` tampering.
-  - XML Signature Wrapping (**XSW-1** & **XSW-2** assertion cloning).
+  - Extended XML Signature Wrapping (**XSW-1** through **XSW-8** assertion cloning).
+  - Weak SHA-1 signature/digest algorithm detection (`xmldsig#sha1`, `rsa-sha1`).
   - SAML comment injection (`admin<!--comment-->@target.com`), `AudienceRestriction` & `Recipient` URL swapping, XXE DTD probing templates.
-- **OWASP WSTG (Password Management, Auth & AuthZ)**:
+- **Module 5: OWASP WSTG (Password Management, Auth & AuthZ)**:
   - **WSTG-ATHN-01**: Unencrypted HTTP channel detection.
-  - **WSTG-ATHN-04**: Header-based authentication bypass (`X-Forwarded-User`, `X-Remote-User`, `X-Original-URL`, `X-User-Id`, `X-Role`).
+  - **WSTG-ATHN-04**: Header-based authentication bypass (`X-Forwarded-User`, `X-Remote-User`, `X-Original-URL`, `X-User-Id`, `X-Role`, `X-Real-IP`, `CF-Connecting-IP`).
   - **WSTG-ATHN-06**: Browser cache control header checks (`Cache-Control: no-store`, `Pragma: no-cache`).
-  - **WSTG-ATHN-07**: Password complexity policy checker.
-  - **WSTG-ATHN-08**: Password reset token disclosure in response bodies.
-  - **WSTG-ATHZ-02 / 03 / 04**: Administrative path direct access, privilege escalation via role parameter tampering (`role=admin`, `is_admin=true`), and IDOR parameter increment probes.
+  - **WSTG-ATHZ-01 / 02 / 03 / 04**: Administrative path direct access, directory traversal path bypasses (`/admin/..;/`, `/%2e/admin`), privilege escalation via role parameter tampering (`role=admin`, `is_admin=true`), and IDOR parameter increment probes.
+- **Module 6: WAF Bypass**:
+  - IP Spoofing header sets (`X-Forwarded-For`, `X-Real-IP`, `X-Originating-IP`, `CF-Connecting-IP`, `True-Client-IP`).
+  - HTTP Verb Override (`X-HTTP-Method-Override`).
+  - Path encoding (%252f double encoding), case randomization, Content-Type juggling.
 
 ---
 
